@@ -75,10 +75,15 @@ namespace AiUsageWidget.Providers
             return Parse(resp.Text);
         }
 
+        // Pure path computation (no environment reads), reachable from the self-test.
+        public static string DefaultAuthPath(string profileFolder)
+        {
+            return Path.Combine(profileFolder, ".local", "share", "opencode", "auth.json");
+        }
+
         static string DefaultAuthPath()
         {
-            string profile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
-            return Path.Combine(profile, ".local", "share", "opencode", "auth.json");
+            return DefaultAuthPath(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile));
         }
 
         // Pure: no I/O, no clock. RefreshService stamps FetchedAtUtc.

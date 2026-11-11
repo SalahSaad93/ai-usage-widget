@@ -80,8 +80,9 @@ namespace AiUsageWidget.Core
 
         public Settings()
         {
+            // Empty by default: MergeProviders then returns every provider, enabled, in
+            // registry order. Only an explicit providers list in settings.json reorders.
             Providers = new List<ProviderSetting>();
-            Providers.Add(new ProviderSetting { Id = "codex", Enabled = true });
             Update = new UpdateSettings();
         }
 
@@ -141,6 +142,9 @@ namespace AiUsageWidget.Core
                     ps.Enabled = Json.GetBool(pd, "enabled", true);
                     list.Add(ps);
                 }
+                // The pre-0.2.2 default was exactly [{"id":"codex","enabled":true}] — never a
+                // user choice; treat it as empty so the registry order keeps applying.
+                if (list.Count == 1 && list[0].Id == "codex" && list[0].Enabled) list.Clear();
                 if (list.Count > 0) Providers = list;
             }
 

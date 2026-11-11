@@ -87,12 +87,17 @@ namespace AiUsageWidget.Providers
             return Parse(resp.Text);
         }
 
+        // Pure path computation (no environment reads), reachable from the self-test.
+        public static string DefaultAuthPath(string profileFolder, string codexHomeOverride)
+        {
+            if (!string.IsNullOrEmpty(codexHomeOverride)) return Path.Combine(codexHomeOverride, "auth.json");
+            return Path.Combine(profileFolder, ".codex", "auth.json");
+        }
+
         static string DefaultAuthPath()
         {
-            string codexHome = Environment.GetEnvironmentVariable("CODEX_HOME");
-            if (!string.IsNullOrEmpty(codexHome)) return Path.Combine(codexHome, "auth.json");
-            string profile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
-            return Path.Combine(profile, ".codex", "auth.json");
+            return DefaultAuthPath(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+                Environment.GetEnvironmentVariable("CODEX_HOME"));
         }
 
         // Pure: no I/O, no clock. RefreshService stamps FetchedAtUtc.

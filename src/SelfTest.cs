@@ -32,6 +32,7 @@ namespace AiUsageWidget
             Check(lines, "stale_and_backoff_transitions", StaleAndBackoff);
             Check(lines, "codex_missing_auth", CodexMissingAuth);
             Check(lines, "settings_defaults_and_clamping", SettingsDefaultsAndClamping);
+            Check(lines, "provider_default_order", ProviderDefaultOrder);
             Check(lines, "version_comparison", VersionComparison);
             Check(lines, "hash_mismatch_rejection", HashMismatchRejection);
             Check(lines, "exe_swap_and_rollback", ExeSwapAndRollback);
@@ -45,6 +46,9 @@ namespace AiUsageWidget
             Check(lines, "muse_synthetic_mapping", MuseSyntheticMapping);
             Check(lines, "muse_cli_states", MuseCliStates);
             Check(lines, "opencode_go_not_configured", OpenCodeGoNotConfigured);
+            Check(lines, "row_order_follows_providers", RowOrderFollowsProviders);
+            Check(lines, "compact_width_fits_names", CompactWidthFitsNames);
+            Check(lines, "default_credential_paths", DefaultCredentialPaths);
 
             string[] all = lines.ToArray();
             if (!string.IsNullOrEmpty(outPath)) File.WriteAllLines(outPath, all, new UTF8Encoding(false)); // no BOM: the log must start with PASS
@@ -332,8 +336,7 @@ namespace AiUsageWidget
             Settings s = Settings.Load(path);   // missing file
             That(s.RefreshMinutes == 5 && s.Layout == "detailed" && s.AlwaysOnTop, "defaults");
             That(s.Bounds.Width == 340 && s.Bounds.Height == 560, "default bounds");
-            That(s.Providers.Count == 1 && s.Providers[0].Id == "codex" && s.Providers[0].Enabled,
-                "default providers");
+            That(s.Providers.Count == 0, "default providers list is empty -> registry order");
             That(s.Update.Mode == "auto" && s.Update.Repo == "SalahSaad93/ai-usage-widget" && s.Update.RequiresToken,
                 "update defaults");
 
@@ -357,6 +360,52 @@ namespace AiUsageWidget
             File.WriteAllText(path, "{ this is not json");
             s = Settings.Load(path);
             That(s.RefreshMinutes == 5, "malformed file falls back to defaults");
+        }
+
+        static void ProviderDefaultOrder()
+        {
+            IUsageProvider[] registry = ProviderRegistry.All;
+            string path = Path.Combine(AppPaths.DataDir, "settings-order.json");
+
+            // No settings at all: every provider, enabled, in registry order.
+            Settings s = Settings.Load(path);
+            List<IUsageProvider> merged = s.MergeProviders(registry);
+            That(merged.Count == registry.Length, "empty settings -> every provider");
+            for (int i = 0; i < registry.Length; i++)
+                That(merged[i].Id == registry[i].Id,
+                    "registry order at " + i + ", got " + merged[i].Id);
+            That(merged[0].Id == "claude-code", "default first provider is claude-code");
+
+            // The one legacy shape: exactly [{"id":"codex","enabled":true}] -> treated as empty.
+            File.WriteAllText(path, "{\"providers\":[{\"id\":\"codex\",\"enabled\":true}]}");
+            s = Settings.Load(path);
+            merged = s.MergeProviders(registry);
+            That(merged.Count == registry.Length && merged[0].Id == "claude-code",
+                "old default [codex] behaves as empty");
+
+            // An explicit list controls order and enablement; unnamed ids append enabled in
+            // registry order.
+            File.WriteAllText(path, "{\"providers\":[{\"id\":\"zai\",\"enabled\":true}," +
+                "{\"id\":\"codex\",\"enabled\":false}]}");
+            s = Settings.Load(path);
+            merged = s.MergeProviders(registry);
+            That(merged.Count == registry.Length - 1, "disabled codex dropped, got " + merged.Count);
+            That(merged[0].Id == "zai", "explicit list puts zai first");
+            That(merged[1].Id == "claude-code" && merged[2].Id == "opencode-go" && merged[3].Id == "muse",
+                "unnamed providers append in registry order");
+
+            // Saving untouched defaults must not write the merged list back: a later load
+            // still yields registry order, and the file carries no merged provider ids.
+            string freshPath = Path.Combine(AppPaths.DataDir, "settings-order-fresh.json");
+            s = Settings.Load(freshPath);   // missing -> empty defaults
+            s.Save(freshPath);
+            string saved = File.ReadAllText(freshPath);
+            That(!saved.Contains("\"claude-code\"") && !saved.Contains("\"muse\""),
+                "save writes no merged provider ids, got " + saved);
+            s = Settings.Load(freshPath);
+            merged = s.MergeProviders(registry);
+            That(merged.Count == registry.Length && merged[0].Id == "claude-code",
+                "saved empty list keeps registry order");
         }
 
         static void VersionComparison()
@@ -553,7 +602,9 @@ namespace AiUsageWidget
             // The painter draws an Ok row with no windows as its message, like NotConfigured.
             var one = new List<UsageSnapshot>();
             one.Add(s);
-            List<RowVm> rows = Painter.BuildRows(one, DateTime.UtcNow, null);
+            var visibleIds = new List<string>();
+            visibleIds.Add("muse");
+            List<RowVm> rows = Painter.BuildRows(one, DateTime.UtcNow, visibleIds);
             That(rows.Count == 1 && rows[0].Msg == "no usage yet in this window",
                 "BuildRows exposes the message for an Ok row with no windows");
         }
@@ -608,6 +659,74 @@ namespace AiUsageWidget
                 .FetchAsync(CancellationToken.None).GetAwaiter().GetResult();
             That(s.Status == ProviderStatus.NotConfigured, "opencode-go -> NotConfigured");
             That(s.Message == "no usage API from vendor", "spec message");
+        }
+
+        static UsageSnapshot SnapFor(string id, string name)
+        {
+            var s = new UsageSnapshot();
+            s.ProviderId = id;
+            s.DisplayName = name;
+            s.Status = ProviderStatus.Ok;
+            return s;
+        }
+
+        static void RowOrderFollowsProviders()
+        {
+            var snapshots = new List<UsageSnapshot>();
+            snapshots.Add(SnapFor("codex", "Codex"));
+            snapshots.Add(SnapFor("zai", "Z.ai GLM"));
+            snapshots.Add(SnapFor("claude-code", "Claude Code"));
+            snapshots.Add(SnapFor("muse", "Muse"));   // not active in this session
+
+            var orderedIds = new List<string>();
+            orderedIds.Add("claude-code");
+            orderedIds.Add("codex");
+            orderedIds.Add("zai");
+            List<RowVm> rows = Painter.BuildRows(snapshots, DateTime.UtcNow, orderedIds);
+            That(rows.Count == 3, "inactive provider's snapshot is not drawn");
+            That(rows[0].Name == "Claude Code" && rows[1].Name == "Codex" && rows[2].Name == "Z.ai GLM",
+                "rows follow the active provider order, got " + rows[0].Name + ", " + rows[1].Name +
+                ", " + rows[2].Name);
+        }
+
+        static void CompactWidthFitsNames()
+        {
+            using (Painter painter = new Painter(1f))
+            {
+                var rows = new List<RowVm>();
+                rows.Add(new RowVm { Name = "Claude Code", Plan = "Max 20x Team Plan" });
+                rows.Add(new RowVm { Name = "Codex" });
+                float wide = painter.CompactWidthFor(rows);
+                That(wide > painter.S(420),
+                    "long name + plan needs more than the 420 minimum, got " + wide);
+
+                float none = painter.CompactWidthFor(new List<RowVm>());
+                That(none == painter.S(420), "no rows -> the 420 minimum, got " + none);
+
+                var shortRows = new List<RowVm>();
+                shortRows.Add(new RowVm { Name = "A" });
+                That(painter.CompactWidthFor(shortRows) == painter.S(420),
+                    "short rows never grow the window past the minimum");
+            }
+        }
+
+        static void DefaultCredentialPaths()
+        {
+            string profile = Path.Combine(Path.GetTempPath(), "profile-fixture");
+            string claude = ClaudeCodeProvider.DefaultCredentialsPath(profile);
+            That(claude.EndsWith(Path.Combine(".claude", ".credentials.json"), StringComparison.Ordinal),
+                "claude path ends with \\.claude\\.credentials.json, got " + claude);
+
+            string codex = CodexProvider.DefaultAuthPath(profile, null);
+            That(codex.EndsWith(Path.Combine(".codex", "auth.json"), StringComparison.Ordinal),
+                "codex path ends with \\.codex\\auth.json, got " + codex);
+            string codexHome = Path.Combine(profile, "custom-home");
+            That(CodexProvider.DefaultAuthPath(profile, codexHome) == Path.Combine(codexHome, "auth.json"),
+                "CODEX_HOME override wins");
+
+            string zai = ZaiProvider.DefaultAuthPath(profile);
+            That(zai.EndsWith(Path.Combine(".local", "share", "opencode", "auth.json"), StringComparison.Ordinal),
+                "zai path ends with \\.local\\share\\opencode\\auth.json, got " + zai);
         }
 
     }

@@ -83,10 +83,16 @@ namespace AiUsageWidget.Providers
             return Parse(resp.Text, planName);
         }
 
+        // Pure path computation (no environment reads), reachable from the self-test: the
+        // regression it guards against is credentials.json vs .credentials.json.
+        public static string DefaultCredentialsPath(string profileFolder)
+        {
+            return Path.Combine(profileFolder, ".claude", ".credentials.json");
+        }
+
         static string DefaultCredentialsPath()
         {
-            string profile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
-            return Path.Combine(profile, ".claude", ".credentials.json");
+            return DefaultCredentialsPath(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile));
         }
 
         static double EpochMsNow()

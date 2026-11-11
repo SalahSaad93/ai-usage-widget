@@ -23,7 +23,7 @@ namespace AiUsageWidget
         readonly Timer minuteTimer = new Timer();
         readonly Timer updateTimer = new Timer();
         readonly List<IUsageProvider> activeProviders;
-        readonly HashSet<string> activeIds = new HashSet<string>();
+        readonly List<string> activeIds = new List<string>();   // ordered, as MergeProviders returns them
         readonly string versionText;
 
         int mode;          // 0 = detailed, 1 = compact
@@ -80,20 +80,31 @@ namespace AiUsageWidget
             Invalidate();
         }
 
+        List<RowVm> BuildRowsNow()
+        {
+            return Painter.BuildRows(refresh.Snapshots, DateTime.UtcNow, activeIds);
+        }
+
         // The window is exactly as tall as its rows (as in the prototype), capped to the screen.
-        // A window sitting in the lower half of the screen keeps its bottom edge in place.
+        // A window sitting in the lower half of the screen keeps its bottom edge in place, and
+        // in compact mode the width tracks the widest title with the right edge in place.
         void FitHeightToContent()
         {
-            List<RowVm> rows = Painter.BuildRows(refresh.Snapshots, DateTime.UtcNow, activeIds);
+            List<RowVm> rows = BuildRowsNow();
             if (rows.Count == 0) return;
             Rectangle wa = Screen.FromControl(this).WorkingArea;
             int wanted = (int)Math.Ceiling(painter.HeaderHeight + painter.ContentHeight(mode, rows) + painter.FooterHeight);
             int height = Math.Min(wanted, wa.Height - 32);
-            if (height == ClientSize.Height) return;
+            int width = mode == 0
+                ? ClientSize.Width
+                : Math.Min((int)Math.Ceiling(painter.CompactWidthFor(rows)), wa.Width - 32);
+            if (height == ClientSize.Height && width == ClientSize.Width) return;
             bool anchorBottom = Top + Height / 2 > wa.Top + wa.Height / 2;
             int bottom = Bottom;
-            ClientSize = new Size(ClientSize.Width, height);
+            int right = Right;
+            ClientSize = new Size(width, height);
             if (anchorBottom) Top = Math.Max(wa.Top, bottom - Height);
+            Left = Math.Max(wa.Left, right - Width);
         }
 
         void Balloon(string text)
@@ -280,8 +291,12 @@ namespace AiUsageWidget
             mode = layout == "compact" ? 1 : 0;
             scroll = 0;
             int right = Right;
-            ClientSize = new Size((int)painter.S(mode == 0 ? 340 : 420), ClientSize.Height);
-            Left = Math.Max(Screen.FromControl(this).WorkingArea.Left, right - Width);   // keep the right edge in place
+            Rectangle wa = Screen.FromControl(this).WorkingArea;
+            int width = mode == 0
+                ? (int)painter.S(340)
+                : Math.Min((int)Math.Ceiling(painter.CompactWidthFor(BuildRowsNow())), wa.Width - 32);
+            ClientSize = new Size(width, ClientSize.Height);
+            Left = Math.Max(wa.Left, right - Width);   // keep the right edge in place
             FitHeightToContent();
             SaveSettings();
             BuildMenu();
@@ -356,7 +371,7 @@ namespace AiUsageWidget
 
         protected override void OnPaint(PaintEventArgs e)
         {
-            List<RowVm> rows = Painter.BuildRows(refresh.Snapshots, DateTime.UtcNow, activeIds);
+            List<RowVm> rows = BuildRowsNow();
             painter.Draw(e.Graphics, ClientSize.Width, ClientSize.Height, mode, scroll, rows,
                 HeaderNote());
         }
@@ -389,7 +404,7 @@ namespace AiUsageWidget
 
         protected override void OnMouseWheel(MouseEventArgs e)
         {
-            List<RowVm> rows = Painter.BuildRows(refresh.Snapshots, DateTime.UtcNow, activeIds);
+            List<RowVm> rows = BuildRowsNow();
             float max = painter.ContentHeight(mode, rows)
                 - (ClientSize.Height - painter.HeaderHeight - painter.FooterHeight);
             scroll -= e.Delta / 4;

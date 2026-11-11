@@ -111,13 +111,18 @@ namespace AiUsageWidget
         }
 
         public static List<RowVm> BuildRows(List<UsageSnapshot> snapshots, DateTime nowUtc,
-            ICollection<string> visibleIds)
+            IList<string> orderedIds)
         {
             var rows = new List<RowVm>();
-            if (snapshots == null) return rows;
-            foreach (UsageSnapshot sn in snapshots)
+            if (snapshots == null || orderedIds == null) return rows;
+            // Rows follow the active provider order, not the order snapshots happen to sit in
+            // the cache; a provider that is not active is not drawn.
+            foreach (string id in orderedIds)
             {
-                if (visibleIds != null && !visibleIds.Contains(sn.ProviderId)) continue;
+                UsageSnapshot sn = null;
+                foreach (UsageSnapshot s in snapshots)
+                    if (s.ProviderId == id) { sn = s; break; }
+                if (sn == null) continue;
                 var row = new RowVm();
                 row.Name = string.IsNullOrEmpty(sn.DisplayName) ? sn.ProviderId : sn.DisplayName;
                 row.Plan = sn.PlanName;
@@ -187,6 +192,27 @@ namespace AiUsageWidget
         public RectangleF CompactRect(float w, float h)
         {
             return new RectangleF(w - S(68), h - FooterHeight + S(4), S(60), S(20));
+        }
+
+        // Width the compact layout needs to show every title whole: the widest name (plus a
+        // plan that fits whole), the three bar columns and the side margins; never below 420.
+        public float CompactWidthFor(List<RowVm> rows)
+        {
+            float titleNeeded = 0;
+            using (var probe = new Bitmap(1, 1))
+            using (Graphics g = Graphics.FromImage(probe))
+            {
+                if (rows != null)
+                    foreach (RowVm r in rows)
+                    {
+                        float w = g.MeasureString(r.Name ?? "", fName, 1000, near).Width;
+                        if (!string.IsNullOrEmpty(r.Plan))
+                            w += S(6) + g.MeasureString(r.Plan, fPlan, 1000, near).Width;
+                        if (w > titleNeeded) titleNeeded = w;
+                    }
+            }
+            float needed = titleNeeded + S(266) + S(2);   // left margin + 3 columns + right margin
+            return Math.Max(S(420), needed);
         }
 
         public RectangleF RefreshRect(float w)
@@ -307,10 +333,14 @@ namespace AiUsageWidget
             float x = box.X;
             Txt(g, r.Name, fName, r.Status == ProviderStatus.NotConfigured ? Dim : Fg, box, false);
             x += g.MeasureString(r.Name, fName, 1000, near).Width + S(6);
-            if (!string.IsNullOrEmpty(r.Plan) && x < box.Right)
+            if (!string.IsNullOrEmpty(r.Plan))
             {
-                Txt(g, r.Plan, fPlan, Dim, new RectangleF(x, box.Y + S(1), box.Right - x, box.Height), false);
-                x += g.MeasureString(r.Plan, fPlan, 1000, near).Width + S(6);
+                float planW = g.MeasureString(r.Plan, fPlan, 1000, near).Width;
+                if (x + planW <= box.Right)   // the plan shows whole or not at all, never clipped
+                {
+                    Txt(g, r.Plan, fPlan, Dim, new RectangleF(x, box.Y + S(1), planW, box.Height), false);
+                    x += planW + S(6);
+                }
             }
             if (r.Status == ProviderStatus.Stale && x < box.Right)
                 Txt(g, r.Msg, fSmall, Yellow, new RectangleF(x, box.Y + S(1), box.Right - x, box.Height), false);

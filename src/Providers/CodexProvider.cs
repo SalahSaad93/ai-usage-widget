@@ -37,6 +37,13 @@ namespace AiUsageWidget.Providers
         public string Id { get { return "codex"; } }
         public string DisplayName { get { return "Codex"; } }
 
+        // Detected when auth.json exists under CODEX_HOME or the profile (spec 13); the
+        // pure DefaultAuthPath already encodes that order.
+        public bool IsDetected()
+        {
+            return Detection.FileExists(authFileOverride ?? DefaultAuthPath());
+        }
+
         public async Task<UsageSnapshot> FetchAsync(CancellationToken ct)
         {
             string authPath = authFileOverride ?? DefaultAuthPath();

@@ -29,6 +29,12 @@ namespace AiUsageWidget.Providers
         public string Id { get { return "claude-code"; } }
         public string DisplayName { get { return "Claude Code"; } }
 
+        // Detected when the credentials file exists; the existence check alone (spec 13).
+        public bool IsDetected()
+        {
+            return Detection.FileExists(credentialsFileOverride ?? DefaultCredentialsPath());
+        }
+
         public async Task<UsageSnapshot> FetchAsync(CancellationToken ct)
         {
             string path = credentialsFileOverride ?? DefaultCredentialsPath();

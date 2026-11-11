@@ -14,7 +14,7 @@ namespace AiUsageWidget.Core
         public const int TimeoutSeconds = 15;
         static readonly int[] BackoffMinutes = { 10, 20, 30 };
 
-        readonly IUsageProvider[] providers;
+        IUsageProvider[] providers;   // replaced at the start of every refresh by the form
         readonly Func<DateTime> clockUtc;
         readonly string cachePath;
 
@@ -26,6 +26,13 @@ namespace AiUsageWidget.Core
             this.providers = providers;
             this.clockUtc = clockUtc;
             this.cachePath = cachePath;
+        }
+
+        // Detection may add or remove providers between runs (spec section 13): the form
+        // recomputes the shown set at the start of every refresh and hands it over here.
+        public void SetProviders(IUsageProvider[] shown)
+        {
+            providers = shown;
         }
 
         public List<UsageSnapshot> Snapshots { get; private set; }

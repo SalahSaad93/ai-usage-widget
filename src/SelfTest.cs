@@ -49,6 +49,11 @@ namespace AiUsageWidget
             Check(lines, "row_order_follows_providers", RowOrderFollowsProviders);
             Check(lines, "compact_width_fits_names", CompactWidthFitsNames);
             Check(lines, "default_credential_paths", DefaultCredentialPaths);
+            Check(lines, "detection_helper", DetectionHelper);
+            Check(lines, "providers_detected", ProvidersDetected);
+            Check(lines, "shown_rule", ShownRule);
+            Check(lines, "known_tools_suggestions", KnownToolsSuggestions);
+            Check(lines, "settings_new_fields", SettingsNewFields);
 
             string[] all = lines.ToArray();
             if (!string.IsNullOrEmpty(outPath)) File.WriteAllLines(outPath, all, new UTF8Encoding(false)); // no BOM: the log must start with PASS
@@ -207,6 +212,8 @@ namespace AiUsageWidget
             public int Calls;
             public ProviderStatus Status;
             public string Message;
+
+            public bool IsDetected() { return true; }
 
             public Task<UsageSnapshot> FetchAsync(CancellationToken ct)
             {
@@ -586,9 +593,21 @@ namespace AiUsageWidget
 
             string dir = Path.Combine(AppPaths.DataDir, "zai-home");
             string missing = Path.Combine(dir, "auth.json");
-            ZaiProvider p = new ZaiProvider(missing);
-            s = p.FetchAsync(CancellationToken.None).GetAwaiter().GetResult();
-            That(s.Status == ProviderStatus.NotConfigured, "missing key file -> NotConfigured");
+            string missingConfig = Path.Combine(dir, "zcode-config.json");
+            // With the key file gone, the fallback sources must also be inert: no real
+            // ZCode config is read and no network call is made.
+            string oldZai = Environment.GetEnvironmentVariable("ZAI_API_KEY");
+            Environment.SetEnvironmentVariable("ZAI_API_KEY", null);
+            try
+            {
+                ZaiProvider p = new ZaiProvider(missing, missingConfig);
+                s = p.FetchAsync(CancellationToken.None).GetAwaiter().GetResult();
+                That(s.Status == ProviderStatus.NotConfigured, "no key source -> NotConfigured");
+            }
+            finally
+            {
+                Environment.SetEnvironmentVariable("ZAI_API_KEY", oldZai);
+            }
         }
 
         static void MuseEmptyAllowance()
@@ -727,6 +746,263 @@ namespace AiUsageWidget
             string zai = ZaiProvider.DefaultAuthPath(profile);
             That(zai.EndsWith(Path.Combine(".local", "share", "opencode", "auth.json"), StringComparison.Ordinal),
                 "zai path ends with \\.local\\share\\opencode\\auth.json, got " + zai);
+        }
+
+        static void DetectionHelper()
+        {
+            string root = Path.Combine(AppPaths.DataDir, "detect");
+            Directory.CreateDirectory(root);
+            string dir = Path.Combine(root, "tools");
+            Directory.CreateDirectory(dir);
+            string folder = Path.Combine(root, ".some-tool");
+            Directory.CreateDirectory(folder);
+            File.WriteAllText(Path.Combine(dir, "muse.exe"), "x");
+            File.WriteAllText(Path.Combine(dir, "muse.cmd"), "x");
+            File.WriteAllText(Path.Combine(dir, "muse.bat"), "x");
+
+            That(Detection.FolderExists(folder), "folder probe");
+            That(!Detection.FolderExists(Path.Combine(root, "missing")), "missing folder probe");
+            That(!Detection.FolderExists(null), "null folder probe");
+            That(Detection.FileExists(Path.Combine(dir, "muse.exe")), "file probe");
+            That(!Detection.FileExists(Path.Combine(root, "missing.txt")), "missing file probe");
+            That(!Detection.FileExists(null), "null file probe");
+            That(Detection.ProfileFolderExists(root, ".some-tool"), "profile folder probe");
+            That(!Detection.ProfileFolderExists(root, ".nope"), "profile folder miss");
+            That(Detection.ReadTextIfExists(Path.Combine(dir, "muse.exe")) == "x", "read probe");
+            That(Detection.ReadTextIfExists(null) == null, "null read probe");
+
+            string pathValue = dir + ";" + root;
+            That(Detection.OnPath(pathValue, "muse.exe"), ".exe on PATH");
+            That(Detection.OnPath(pathValue, "muse.cmd"), ".cmd on PATH");
+            That(Detection.OnPath(pathValue, "muse.bat"), ".bat on PATH");
+            That(!Detection.OnPath(pathValue, "absent.exe"), "absent leaf on PATH");
+            That(!Detection.OnPath(null, "muse.exe"), "null PATH");
+            That(!Detection.OnPath("", "muse.exe"), "empty PATH");
+            That(!Detection.OnPath(";; ;", "muse.exe"), "blank PATH segments");
+        }
+
+        static void ProvidersDetected()
+        {
+            string root = Path.Combine(AppPaths.DataDir, "detect-providers");
+            Directory.CreateDirectory(root);
+
+            // Claude Code: the credentials file, present or missing.
+            string claudeCreds = Path.Combine(root, "claude-credentials.json");
+            That(!new ClaudeCodeProvider(claudeCreds).IsDetected(), "claude: missing credentials");
+            File.WriteAllText(claudeCreds, "{}");
+            That(new ClaudeCodeProvider(claudeCreds).IsDetected(), "claude: credentials file");
+
+            // Codex: the auth file, then the CODEX_HOME source.
+            string codexAuth = Path.Combine(root, "codex-auth.json");
+            That(!new CodexProvider(codexAuth).IsDetected(), "codex: missing auth");
+            File.WriteAllText(codexAuth, "{}");
+            That(new CodexProvider(codexAuth).IsDetected(), "codex: auth file");
+            string codexHome = Path.Combine(root, "codex-home");
+            Directory.CreateDirectory(codexHome);
+            File.WriteAllText(Path.Combine(codexHome, "auth.json"), "{}");
+            string oldHome = Environment.GetEnvironmentVariable("CODEX_HOME");
+            Environment.SetEnvironmentVariable("CODEX_HOME", codexHome);
+            try
+            {
+                That(new CodexProvider().IsDetected(), "codex: CODEX_HOME honoured");
+            }
+            finally
+            {
+                Environment.SetEnvironmentVariable("CODEX_HOME", oldHome);
+            }
+
+            // Z.ai: the three key sources, each isolated, then none.
+            string zaiAuth = Path.Combine(root, "zai-auth.json");
+            string zaiConfig = Path.Combine(root, "zcode-config.json");
+            string oldZai = Environment.GetEnvironmentVariable("ZAI_API_KEY");
+            Environment.SetEnvironmentVariable("ZAI_API_KEY", null);
+            try
+            {
+                ZaiProvider zai = new ZaiProvider(zaiAuth, zaiConfig);
+                That(!zai.IsDetected(), "zai: no source");
+                File.WriteAllText(zaiAuth, "{\"zai-coding-plan\":{\"key\":\"k\"}}");
+                That(zai.IsDetected(), "zai: auth.json key");
+                File.WriteAllText(zaiAuth, "{\"zai-coding-plan\":{\"key\":\"\"}}");
+                Environment.SetEnvironmentVariable("ZAI_API_KEY", "selftest-placeholder");
+                That(zai.IsDetected(), "zai: env var after empty auth key");
+                Environment.SetEnvironmentVariable("ZAI_API_KEY", null);
+                File.WriteAllText(zaiConfig, "{\"provider\":{\"zai\":{\"options\":{\"apiKey\":\"k\"}}}}");
+                That(zai.IsDetected(), "zai: ZCode config key");
+                File.WriteAllText(zaiConfig, "{\"provider\":{\"zai\":{\"options\":{\"apiKey\":\"\"}}}}");
+                That(!zai.IsDetected(), "zai: empty keys are no source");
+            }
+            finally
+            {
+                Environment.SetEnvironmentVariable("ZAI_API_KEY", oldZai);
+            }
+
+            // OpenCode Go: an "opencode-go" entry in opencode's auth.json.
+            string ogAuth = Path.Combine(root, "og-auth.json");
+            That(!new OpenCodeGoProvider(ogAuth).IsDetected(), "opencode-go: missing auth");
+            File.WriteAllText(ogAuth, "{\"zai-coding-plan\":{\"key\":\"k\"}}");
+            That(!new OpenCodeGoProvider(ogAuth).IsDetected(), "opencode-go: no entry");
+            File.WriteAllText(ogAuth, "{\"opencode-go\":{}}");
+            That(new OpenCodeGoProvider(ogAuth).IsDetected(), "opencode-go: entry present");
+
+            // Muse: on PATH, each extension form, then none.
+            string museDir = Path.Combine(root, "muse-bin");
+            Directory.CreateDirectory(museDir);
+            string fakePath = museDir + ";C:\\nowhere";
+            That(!new MuseProvider(null, fakePath).IsDetected(), "muse: not on PATH");
+            File.WriteAllText(Path.Combine(museDir, "muse.exe"), "x");
+            That(new MuseProvider(null, fakePath).IsDetected(), "muse: muse.exe on PATH");
+            File.Delete(Path.Combine(museDir, "muse.exe"));
+            File.WriteAllText(Path.Combine(museDir, "muse.cmd"), "x");
+            That(new MuseProvider(null, fakePath).IsDetected(), "muse: muse.cmd on PATH");
+            File.Delete(Path.Combine(museDir, "muse.cmd"));
+            File.WriteAllText(Path.Combine(museDir, "muse.bat"), "x");
+            That(new MuseProvider(null, fakePath).IsDetected(), "muse: muse.bat on PATH");
+            File.Delete(Path.Combine(museDir, "muse.bat"));
+            That(!new MuseProvider(null, "").IsDetected(), "muse: empty PATH");
+        }
+
+        sealed class FakeProv : IUsageProvider
+        {
+            readonly string id;
+            public FakeProv(string id) { this.id = id; }
+            public string Id { get { return id; } }
+            public string DisplayName { get { return id; } }
+            public bool IsDetected() { return false; }
+            public Task<UsageSnapshot> FetchAsync(CancellationToken ct)
+            {
+                throw new InvalidOperationException("not fetched in this check");
+            }
+        }
+
+        static void ShownRule()
+        {
+            var registry = new IUsageProvider[]
+            {
+                new FakeProv("claude-code"), new FakeProv("codex"), new FakeProv("zai")
+            };
+            var entries = new List<ProviderSetting>();
+            entries.Add(new ProviderSetting { Id = "codex", Enabled = true });
+            entries.Add(new ProviderSetting { Id = "zai", Enabled = false });
+            Func<string, bool> claudeDetected = delegate(string id) { return id == "claude-code"; };
+
+            // listed enabled -> shown; listed disabled -> hidden; unlisted detected -> shown.
+            List<IUsageProvider> shown = Settings.SelectShown(registry, entries, true, claudeDetected);
+            That(shown.Count == 2, "two shown, got " + shown.Count);
+            That(shown[0].Id == "codex" && shown[1].Id == "claude-code",
+                "listed first, then registry order");
+
+            // unlisted + undetected + autoDetect -> hidden.
+            Func<string, bool> none = delegate(string id) { return false; };
+            shown = Settings.SelectShown(registry, entries, true, none);
+            That(shown.Count == 1 && shown[0].Id == "codex", "undetected unlisted hidden");
+
+            // autoDetect off: unlisted show without any detection signal (the pre-detection
+            // behaviour); the listed-disabled zai stays hidden either way.
+            shown = Settings.SelectShown(registry, entries, false, none);
+            That(shown.Count == 2 && shown[0].Id == "codex" && shown[1].Id == "claude-code",
+                "autoDetect off shows unlisted without detection");
+
+            // listed disabled stays hidden even when autoDetect is off.
+            var onlyDisabled = new List<ProviderSetting>();
+            onlyDisabled.Add(new ProviderSetting { Id = "codex", Enabled = false });
+            shown = Settings.SelectShown(registry, onlyDisabled, false, none);
+            That(shown.Count == 2 && shown[0].Id == "claude-code" && shown[1].Id == "zai",
+                "listed disabled always hidden");
+
+            // empty entries: registry order filtered by detection.
+            shown = Settings.SelectShown(registry, new List<ProviderSetting>(), true, claudeDetected);
+            That(shown.Count == 1 && shown[0].Id == "claude-code",
+                "empty list -> detected only, registry order");
+        }
+
+        static List<string> DetectedToolIds(string profile, string local, string pathValue)
+        {
+            var ids = new List<string>();
+            foreach (KnownTool tool in KnownTools.All())
+                if (KnownTools.IsDetected(tool, profile, local, pathValue)) ids.Add(tool.Id);
+            return ids;
+        }
+
+        static void KnownToolsSuggestions()
+        {
+            string root = Path.Combine(AppPaths.DataDir, "known-tools");
+            Directory.CreateDirectory(root);
+            string profile = Path.Combine(root, "profile");
+            Directory.CreateDirectory(profile);
+            string local = Path.Combine(root, "local");
+            string binDir = Path.Combine(root, "bin");
+            Directory.CreateDirectory(binDir);
+            string pathValue = binDir + ";C:\\nowhere";
+
+            That(KnownTools.All().Count == 5, "five known tools");
+            That(DetectedToolIds(profile, local, pathValue).Count == 0, "nothing detected yet");
+
+            Directory.CreateDirectory(Path.Combine(profile, ".cursor"));
+            List<string> ids = DetectedToolIds(profile, local, pathValue);
+            That(ids.Contains("cursor") && ids.Count == 1, "cursor via profile folder");
+
+            Directory.CreateDirectory(Path.Combine(local, "github-copilot"));
+            ids = DetectedToolIds(profile, local, pathValue);
+            That(ids.Contains("github-copilot") && ids.Count == 2, "copilot via local app data");
+
+            File.WriteAllText(Path.Combine(binDir, "gemini.cmd"), "x");
+            ids = DetectedToolIds(profile, local, pathValue);
+            That(ids.Contains("gemini-cli") && ids.Count == 3, "gemini via PATH");
+
+            Directory.CreateDirectory(Path.Combine(profile, ".grok"));
+            ids = DetectedToolIds(profile, local, pathValue);
+            That(ids.Contains("grok-build") && ids.Count == 4, "grok via profile folder");
+
+            File.WriteAllText(Path.Combine(binDir, "agy.exe"), "x");
+            ids = DetectedToolIds(profile, local, pathValue);
+            That(ids.Contains("antigravity") && ids.Count == 5, "antigravity via PATH");
+
+            // Dismissed tools are not suggestions.
+            var dismissed = new List<string>();
+            dismissed.Add("cursor");
+            List<string> suggestions = KnownTools.SuggestedIds(ids, dismissed);
+            That(suggestions.Count == 4 && !suggestions.Contains("cursor"), "dismissed filtered");
+
+            // The request URL: exact and encoded; an empty repo disables it.
+            string url = KnownTools.IssueUrl("owner/repo", "GitHub Copilot");
+            That(url == "https://github.com/owner/repo/issues/new?title=Add+provider:+GitHub+Copilot",
+                "request URL, got " + url);
+            That(KnownTools.IssueUrl(null, "Cursor") == null, "null repo disables");
+            That(KnownTools.IssueUrl("", "Cursor") == null, "empty repo disables");
+        }
+
+        static void SettingsNewFields()
+        {
+            string path = Path.Combine(AppPaths.DataDir, "settings-new-fields.json");
+            Settings s = Settings.Load(path);   // missing file
+            That(s.AutoDetect, "autoDetect defaults true");
+            That(s.DismissedSuggestions.Count == 0 && s.AnnouncedSuggestions.Count == 0
+                && s.KnownProviders.Count == 0, "suggestion lists default empty");
+            That(!s.HasFile, "missing file -> HasFile false");
+
+            File.WriteAllText(path, "{\"autoDetect\":false," +
+                "\"dismissedSuggestions\":[\"cursor\",\"gemini-cli\"]," +
+                "\"announcedSuggestions\":[\"grok-build\"]," +
+                "\"knownProviders\":[\"codex\",\"zai\"],\"custom\":7}");
+            s = Settings.Load(path);
+            That(!s.AutoDetect, "autoDetect read");
+            That(s.DismissedSuggestions.Count == 2 && s.DismissedSuggestions[0] == "cursor",
+                "dismissedSuggestions read");
+            That(s.AnnouncedSuggestions.Count == 1 && s.AnnouncedSuggestions[0] == "grok-build",
+                "announcedSuggestions read");
+            That(s.KnownProviders.Count == 2 && s.KnownProviders[1] == "zai", "knownProviders read");
+            That(s.HasFile, "present file -> HasFile true");
+
+            s.AutoDetect = true;
+            s.DismissedSuggestions.Add("antigravity");
+            s.Save(path);
+            string saved = File.ReadAllText(path);
+            That(saved.Contains("\"autoDetect\":true"), "autoDetect saved");
+            That(saved.Contains("antigravity"), "dismissedSuggestions saved");
+            That(saved.Contains("\"custom\""), "unknown keys preserved");
+            s = Settings.Load(path);
+            That(s.AutoDetect && s.DismissedSuggestions.Count == 3 && s.KnownProviders.Count == 2,
+                "new fields round-trip");
         }
 
     }

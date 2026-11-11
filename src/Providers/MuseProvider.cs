@@ -26,17 +26,35 @@ namespace AiUsageWidget.Providers
         const int TimeoutMs = 15000;
 
         readonly Func<CancellationToken, Task<MuseCliResult>> runnerOverride;
+        readonly string pathOverride;
 
         public MuseProvider() : this(null) { }
 
-        // Self-test hook: a fake runner returning fixture text; no process is started.
         public MuseProvider(Func<CancellationToken, Task<MuseCliResult>> runnerOverride)
+            : this(runnerOverride, null)
+        {
+        }
+
+        // Self-test hooks: the fake runner keeps processes out of the self-test; the PATH
+        // override feeds detection without touching the real environment.
+        public MuseProvider(Func<CancellationToken, Task<MuseCliResult>> runnerOverride,
+            string pathOverride)
         {
             this.runnerOverride = runnerOverride;
+            this.pathOverride = pathOverride;
         }
 
         public string Id { get { return "muse"; } }
         public string DisplayName { get { return "Muse"; } }
+
+        // Detected when muse.exe/.cmd/.bat sits in a PATH folder (spec section 13).
+        public bool IsDetected()
+        {
+            string pathValue = pathOverride ?? Environment.GetEnvironmentVariable("PATH");
+            return Detection.OnPath(pathValue, "muse.exe")
+                || Detection.OnPath(pathValue, "muse.cmd")
+                || Detection.OnPath(pathValue, "muse.bat");
+        }
 
         public async Task<UsageSnapshot> FetchAsync(CancellationToken ct)
         {

@@ -46,6 +46,9 @@ namespace AiUsageWidget
 
         static readonly string[] WindowLabels = { "5 hours", "week", "month" };
 
+        // Drawn in the body when no provider is shown (spec section 13).
+        public const string EmptyStateText = "No AI subscriptions detected on this PC";
+
         readonly float s;
         readonly Font fName, fPlan, fSmall, fPct;
         readonly StringFormat near, far;
@@ -194,6 +197,19 @@ namespace AiUsageWidget
             return new RectangleF(w - S(68), h - FooterHeight + S(4), S(60), S(20));
         }
 
+        // "+N not supported yet" sits left of the layout chips; omitted when the window is
+        // too narrow for it to clear the chips.
+        void DrawFooterNote(Graphics g, float w, float h, string text)
+        {
+            if (string.IsNullOrEmpty(text)) return;
+            float left = S(10);
+            float right = DetailedRect(w, h).Left - S(8);
+            if (right - left < S(20)) return;
+            if (g.MeasureString(text, fSmall, 1000, near).Width > right - left) return;
+            Txt(g, text, fSmall, Dim,
+                new RectangleF(left, h - FooterHeight, right - left, FooterHeight), false);
+        }
+
         // Width the compact layout needs to show every title whole: the widest name (plus a
         // plan that fits whole), the three bar columns and the side margins; never below 420.
         public float CompactWidthFor(List<RowVm> rows)
@@ -226,7 +242,7 @@ namespace AiUsageWidget
         }
 
         public void Draw(Graphics g, float winWidth, float winHeight, int mode, int scroll,
-            List<RowVm> rows, string headerNote)
+            List<RowVm> rows, string headerNote, string footerNote)
         {
             g.SmoothingMode = SmoothingMode.AntiAlias;
             g.TextRenderingHint = TextRenderingHint.ClearTypeGridFit;
@@ -239,7 +255,12 @@ namespace AiUsageWidget
             else DrawCompact(g, header - clamped, winWidth, rows);
             g.ResetClip();
 
+            if (rows == null || rows.Count == 0)
+                Txt(g, EmptyStateText, fSmall, Dim,
+                    new RectangleF(S(10), header + S(10), winWidth - S(20), S(19)), false);
+
             DrawHeader(g, winWidth, headerNote);
+            DrawFooterNote(g, winWidth, winHeight, footerNote);
             Chip(g, "Detailed", DetailedRect(winWidth, winHeight), mode == 0);
             Chip(g, "Compact", CompactRect(winWidth, winHeight), mode == 1);
             using (var pen = new Pen(Line)) g.DrawRectangle(pen, 0, 0, winWidth - 1, winHeight - 1);

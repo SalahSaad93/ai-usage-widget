@@ -72,8 +72,16 @@ namespace AiUsageWidget.Core
         public bool AlwaysOnTop = true;
         public Rectangle Bounds = new Rectangle(0, 0, 340, 560);
         public bool HasSavedBounds;   // false on first run: the window goes bottom-right
+        public bool AutoDetect = true;
         public List<ProviderSetting> Providers;
+        public List<string> DismissedSuggestions = new List<string>();
+        public List<string> AnnouncedSuggestions = new List<string>();
+        public List<string> KnownProviders = new List<string>();
         public UpdateSettings Update;
+
+        // False when no settings file existed yet (the very first run) — used to keep the
+        // detection balloons quiet on that run (spec section 13).
+        public bool HasFile { get; private set; }
 
         // The last parsed file; unknown keys are merged back on save.
         Dictionary<string, object> raw;
@@ -105,6 +113,7 @@ namespace AiUsageWidget.Core
             Dictionary<string, object> d = Json.ParseObject(text);
             if (d == null) return settings;   // malformed -> defaults
             settings.raw = d;
+            settings.HasFile = true;
             settings.FromJson(d);
             return settings;
         }
@@ -148,6 +157,14 @@ namespace AiUsageWidget.Core
                 if (list.Count > 0) Providers = list;
             }
 
+            AutoDetect = Json.GetBool(d, "autoDetect", true);
+            List<string> dismissed = GetStringList(d, "dismissedSuggestions");
+            if (dismissed != null) DismissedSuggestions = dismissed;
+            List<string> announced = GetStringList(d, "announcedSuggestions");
+            if (announced != null) AnnouncedSuggestions = announced;
+            List<string> known = GetStringList(d, "knownProviders");
+            if (known != null) KnownProviders = known;
+
             var updateDict = Json.GetObject(d, "update");
             if (updateDict != null)
             {
@@ -157,6 +174,19 @@ namespace AiUsageWidget.Core
                 if (repo != null) Update.Repo = repo;
                 Update.RequiresToken = Json.GetBool(updateDict, "requiresToken", true);
             }
+        }
+
+        static List<string> GetStringList(Dictionary<string, object> d, string key)
+        {
+            List<object> raw = Json.GetArray(d, key);
+            if (raw == null) return null;
+            var list = new List<string>();
+            foreach (object o in raw)
+            {
+                string s = o as string;
+                if (!string.IsNullOrEmpty(s)) list.Add(s);
+            }
+            return list;
         }
 
         public void Save(string path)
@@ -191,6 +221,11 @@ namespace AiUsageWidget.Core
             updateDict["requiresToken"] = Update.RequiresToken;
             outDict["update"] = updateDict;
 
+            outDict["autoDetect"] = AutoDetect;
+            outDict["dismissedSuggestions"] = new List<string>(DismissedSuggestions);
+            outDict["announcedSuggestions"] = new List<string>(AnnouncedSuggestions);
+            outDict["knownProviders"] = new List<string>(KnownProviders);
+
             string dir = Path.GetDirectoryName(path);
             if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir)) Directory.CreateDirectory(dir);
             File.WriteAllText(path, Json.Serialize(outDict));
@@ -200,19 +235,33 @@ namespace AiUsageWidget.Core
         // list are appended enabled.
         public List<IUsageProvider> MergeProviders(IUsageProvider[] registered)
         {
+            return SelectShown(registered, Providers, false, null);
+        }
+
+        // Section 13's shown/hidden rule, pure: registry order in, ordered shown list out.
+        // Listed-and-enabled shows always (detected or not); listed-disabled hides; unlisted
+        // shows when autoDetect is off (the pre-detection behaviour) or when detected.
+        public static List<IUsageProvider> SelectShown(IUsageProvider[] registered,
+            List<ProviderSetting> entries, bool autoDetect, Func<string, bool> isDetected)
+        {
+            var list = new List<IUsageProvider>();
             var byId = new Dictionary<string, IUsageProvider>();
             foreach (IUsageProvider p in registered) byId[p.Id] = p;
-            var list = new List<IUsageProvider>();
-            var used = new HashSet<string>();
-            foreach (ProviderSetting ps in Providers)
-            {
-                IUsageProvider p;
-                if (!byId.TryGetValue(ps.Id, out p)) continue;
-                used.Add(ps.Id);
-                if (ps.Enabled) list.Add(p);
-            }
+            var listed = new HashSet<string>();
+            if (entries != null)
+                foreach (ProviderSetting ps in entries)
+                {
+                    IUsageProvider p;
+                    if (!byId.TryGetValue(ps.Id, out p)) continue;
+                    listed.Add(ps.Id);
+                    if (ps.Enabled) list.Add(p);
+                }
             foreach (IUsageProvider p in registered)
-                if (!used.Contains(p.Id)) list.Add(p);
+            {
+                if (listed.Contains(p.Id)) continue;
+                if (autoDetect && isDetected != null && !isDetected(p.Id)) continue;
+                list.Add(p);
+            }
             return list;
         }
 

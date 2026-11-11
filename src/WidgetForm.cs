@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Drawing;
+using System.Globalization;
 using System.IO;
 using System.Threading.Tasks;
 using System.Windows.Forms;
@@ -22,8 +23,10 @@ namespace AiUsageWidget
         readonly Timer refreshTimer = new Timer();
         readonly Timer minuteTimer = new Timer();
         readonly Timer updateTimer = new Timer();
-        readonly List<IUsageProvider> activeProviders;
-        readonly List<string> activeIds = new List<string>();   // ordered, as MergeProviders returns them
+        List<IUsageProvider> activeProviders;   // recomputed at startup and at every refresh
+        List<string> activeIds = new List<string>();   // ordered, as SelectShown returns them
+        readonly Dictionary<string, IUsageProvider> allById = new Dictionary<string, IUsageProvider>();
+        List<string> suggestions = new List<string>();   // detected tools with no provider
         readonly string versionText;
 
         int mode;          // 0 = detailed, 1 = compact
@@ -34,7 +37,9 @@ namespace AiUsageWidget
         {
             this.versionText = versionText;
             settings = Settings.Load(AppPaths.SettingsPath);
-            activeProviders = settings.MergeProviders(ProviderRegistry.All);
+            foreach (IUsageProvider p in ProviderRegistry.All) allById[p.Id] = p;
+            activeProviders = Settings.SelectShown(ProviderRegistry.All, settings.Providers,
+                settings.AutoDetect, IsProviderDetected);
             foreach (IUsageProvider p in activeProviders) activeIds.Add(p.Id);
             refresh = new RefreshService(activeProviders.ToArray(), UtcNow, AppPaths.CachePath);
             updater = new Updater(settings.Update, AppPaths.RunningExePath, new Version(versionText));
@@ -58,6 +63,9 @@ namespace AiUsageWidget
 
             RestoreSavedBounds();
             InitTray();
+            suggestions = ComputeSuggestions();
+            AnnounceNewSuggestions();
+            AnnounceNewProviders();
             BuildMenu();
             InitTimers();
 
@@ -105,6 +113,136 @@ namespace AiUsageWidget
             ClientSize = new Size(width, height);
             if (anchorBottom) Top = Math.Max(wa.Top, bottom - Height);
             Left = Math.Max(wa.Left, right - Width);
+        }
+
+        // --- auto-detection (spec section 13) -------------------------------------------
+
+        bool IsProviderDetected(string id)
+        {
+            IUsageProvider p;
+            return allById.TryGetValue(id, out p) && p.IsDetected();
+        }
+
+        // Recomputes the shown set from the registry, the settings entries and detection;
+        // hidden providers stop being fetched. Runs at startup and at the start of every
+        // refresh.
+        void RecomputeShown()
+        {
+            activeProviders = Settings.SelectShown(ProviderRegistry.All, settings.Providers,
+                settings.AutoDetect, IsProviderDetected);
+            activeIds = new List<string>();
+            foreach (IUsageProvider p in activeProviders) activeIds.Add(p.Id);
+            refresh.SetProviders(activeProviders.ToArray());
+            suggestions = ComputeSuggestions();
+            AnnounceNewSuggestions();
+            AnnounceNewProviders();
+            FitHeightToContent();
+            Invalidate();
+        }
+
+        List<string> ComputeSuggestions()
+        {
+            string profile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+            string local = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+            var detected = new List<string>();
+            foreach (KnownTool tool in KnownTools.All())
+                if (KnownTools.IsDetected(tool, profile, local, PathValue()))
+                    detected.Add(tool.Id);
+            return KnownTools.SuggestedIds(detected, settings.DismissedSuggestions);
+        }
+
+        string PathValue()
+        {
+            return Environment.GetEnvironmentVariable("PATH");
+        }
+
+        string ToolName(string toolId)
+        {
+            return KnownTools.DisplayNameOf(toolId);
+        }
+
+        string ProviderName(string id)
+        {
+            IUsageProvider p;
+            return allById.TryGetValue(id, out p) ? p.DisplayName : id;
+        }
+
+        // One balloon per provider that becomes shown: only for one that turns up while the
+        // widget runs, or that is new since the last saved state — never on the very first
+        // run (no settings file yet), where the ids are just seeded (spec section 13).
+        void AnnounceNewProviders()
+        {
+            var fresh = new List<string>();
+            foreach (string id in activeIds)
+                if (!settings.KnownProviders.Contains(id)) fresh.Add(id);
+            if (fresh.Count == 0) return;
+            if (settings.HasFile)
+                foreach (string id in fresh)
+                    Balloon("Detected " + ProviderName(id) + ": added to the widget");
+            settings.KnownProviders.AddRange(activeIds);
+            SaveSettings();
+        }
+
+        // One balloon per known tool, ever: announcedSuggestions remembers what was said.
+        void AnnounceNewSuggestions()
+        {
+            var fresh = new List<string>();
+            foreach (string id in suggestions)
+                if (!settings.AnnouncedSuggestions.Contains(id)) fresh.Add(id);
+            if (fresh.Count == 0) return;
+            foreach (string id in fresh)
+                Balloon(ToolName(id) + " found on this PC: no usage support yet");
+            settings.AnnouncedSuggestions.AddRange(fresh);
+            SaveSettings();
+        }
+
+        // A click in the Subscriptions submenu writes an explicit entry: flipped when one
+        // exists, added enabled when the provider was only auto-shown.
+        void ToggleProvider(string id)
+        {
+            ProviderSetting entry = null;
+            foreach (ProviderSetting ps in settings.Providers)
+                if (ps.Id == id) { entry = ps; break; }
+            if (entry != null) entry.Enabled = !entry.Enabled;
+            else
+            {
+                var added = new ProviderSetting();
+                added.Id = id;
+                added.Enabled = true;
+                settings.Providers.Add(added);
+            }
+            SaveSettings();
+            RecomputeShown();
+            BuildMenu();
+        }
+
+        void DismissSuggestion(string toolId)
+        {
+            if (!settings.DismissedSuggestions.Contains(toolId))
+                settings.DismissedSuggestions.Add(toolId);
+            SaveSettings();
+            suggestions = ComputeSuggestions();
+            BuildMenu();
+            Invalidate();
+        }
+
+        void OpenUrl(string url)
+        {
+            if (string.IsNullOrEmpty(url)) return;
+            try
+            {
+                System.Diagnostics.Process.Start(url);
+            }
+            catch (Exception)
+            {
+                // a bad URL or a missing browser must never take the widget down
+            }
+        }
+
+        string FooterNote()
+        {
+            int n = suggestions.Count;
+            return n == 0 ? null : "+" + n.ToString(CultureInfo.InvariantCulture) + " not supported yet";
         }
 
         void Balloon(string text)
@@ -171,6 +309,7 @@ namespace AiUsageWidget
         {
             try
             {
+                RecomputeShown();   // detection runs at the start of every refresh
                 await refresh.RunOnceAsync(manual);
             }
             catch (Exception)
@@ -232,6 +371,52 @@ namespace AiUsageWidget
             layoutItem.DropDownItems.Add(detailed);
             layoutItem.DropDownItems.Add(compact);
             menu.Items.Add(layoutItem);
+
+            // Subscriptions: every registered provider with its shown/hidden state (spec 13).
+            var subsItem = new ToolStripMenuItem("Subscriptions");
+            foreach (IUsageProvider p in ProviderRegistry.All)
+            {
+                bool shown = activeIds.Contains(p.Id);
+                string suffix = !shown ? " (hidden)"
+                    : IsProviderDetected(p.Id) ? " (detected)" : " (not detected)";
+                var item = new ToolStripMenuItem(p.DisplayName + suffix);
+                item.Checked = shown;
+                string id = p.Id;
+                item.Click += delegate { ToggleProvider(id); };
+                subsItem.DropDownItems.Add(item);
+            }
+            subsItem.DropDownItems.Add(new ToolStripSeparator());
+            var autoItem = new ToolStripMenuItem("Auto-detect");
+            autoItem.Checked = settings.AutoDetect;
+            autoItem.Click += delegate
+            {
+                settings.AutoDetect = !settings.AutoDetect;
+                SaveSettings();
+                RecomputeShown();
+                BuildMenu();
+            };
+            subsItem.DropDownItems.Add(autoItem);
+            menu.Items.Add(subsItem);
+
+            // Detected tools with no usage provider yet (spec section 13).
+            suggestions = ComputeSuggestions();
+            var sugItem = new ToolStripMenuItem("Detected, no usage support yet");
+            foreach (string toolId in suggestions)
+            {
+                var entry = new ToolStripMenuItem(ToolName(toolId));
+                string url = KnownTools.IssueUrl(settings.Update.Repo, ToolName(toolId));
+                var requestItem = new ToolStripMenuItem("Request support…");
+                requestItem.Enabled = !string.IsNullOrEmpty(url);
+                requestItem.Click += delegate { OpenUrl(url); };
+                entry.DropDownItems.Add(requestItem);
+                var dismissItem = new ToolStripMenuItem("Dismiss");
+                string dismissedId = toolId;
+                dismissItem.Click += delegate { DismissSuggestion(dismissedId); };
+                entry.DropDownItems.Add(dismissItem);
+                sugItem.DropDownItems.Add(entry);
+            }
+            if (suggestions.Count == 0) sugItem.Enabled = false;
+            menu.Items.Add(sugItem);
 
             var topItem = new ToolStripMenuItem("Always on top");
             topItem.Checked = TopMost;
@@ -373,7 +558,7 @@ namespace AiUsageWidget
         {
             List<RowVm> rows = BuildRowsNow();
             painter.Draw(e.Graphics, ClientSize.Width, ClientSize.Height, mode, scroll, rows,
-                HeaderNote());
+                HeaderNote(), FooterNote());
         }
 
         protected override void OnMouseDown(MouseEventArgs e)

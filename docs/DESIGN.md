@@ -277,3 +277,66 @@ rejected by every usage route tried. The provider returns `NotConfigured` with t
 "no usage API from vendor". Replace it when one exists.
 
 An `Ok` snapshot with no windows draws its `Message` dim in place of the bars.
+
+## 13. Auto-detection and suggestions
+
+The widget works out which subscriptions are used on this PC and shows only those, and it points
+out AI tools it finds but cannot report on yet.
+
+### Detection
+
+- `IUsageProvider` gains `bool IsDetected()`: a cheap, local, existence-only check. It never reads
+  a token value, never starts a process and never uses the network.
+
+  | Provider | Detected when |
+  |---|---|
+  | Claude Code | `%USERPROFILE%\.claude\.credentials.json` exists |
+  | Codex | `auth.json` exists under `%CODEX_HOME%` or `%USERPROFILE%\.codex` |
+  | Z.ai GLM | a Z.ai key source exists (see below) |
+  | OpenCode Go | `%USERPROFILE%\.local\share\opencode\auth.json` has an `opencode-go` entry |
+  | Muse | `muse` is on `PATH` (`muse.exe`, `muse.cmd` or `muse.bat` in a PATH folder) |
+
+- Z.ai key sources, first match wins: `zai-coding-plan.key` in OpenCode's `auth.json`; the
+  `ZAI_API_KEY` environment variable; `provider.zai.options.apiKey` in
+  `%USERPROFILE%\.zcode\cli\config.json`. `ZaiProvider.FetchAsync` uses the same order.
+- `settings.json` gains `"autoDetect": true` (default). A provider is **shown** when:
+  - `settings.providers` lists it with `enabled: true` (always shown, detected or not), or
+  - it is not listed, `autoDetect` is true and `IsDetected()` is true.
+  It is **hidden** when listed with `enabled: false`, or not listed and not detected.
+  With `autoDetect` false, unlisted providers are shown (the pre-detection behaviour).
+- Detection runs at startup and at the start of every refresh. A provider that becomes detected
+  appears on that refresh and the tray shows a balloon "Detected <name>: added to the widget". One
+  that stops being detected disappears without a message. Order is still section 6's.
+- If nothing is shown, the body draws one dim line: "No AI subscriptions detected on this PC".
+
+### Tray menu: Subscriptions
+
+A "Subscriptions" submenu lists every registered provider with a check mark when shown and a
+suffix: "(detected)", "(not detected)" or "(hidden)". Clicking toggles it by writing an explicit
+`enabled` entry to `settings.providers`. A last item "Auto-detect" toggles `autoDetect`.
+
+### Suggestions for tools without a provider
+
+`KnownTools` is a static catalogue of AI tools the widget has no usage provider for, each with a
+display name and existence-only signatures:
+
+| Tool | Detected when |
+|---|---|
+| Cursor | `%USERPROFILE%\.cursor` exists, or `cursor-agent` is on PATH |
+| GitHub Copilot | `%LOCALAPPDATA%\github-copilot` or `%USERPROFILE%\.config\github-copilot` exists |
+| Gemini CLI | `%USERPROFILE%\.gemini` exists, or `gemini` is on PATH |
+| Grok Build | `%USERPROFILE%\.grok` exists, or `grok` is on PATH |
+| Antigravity | `%USERPROFILE%\.antigravity` exists, or `agy` is on PATH |
+
+- A detected, not dismissed tool is a **suggestion**. Suggestions never appear as usage rows.
+- The footer shows, left of the layout chips, dim text "+N not supported yet" when N > 0.
+- The tray menu gets a "Detected, no usage support yet" submenu: one entry per suggestion with two
+  actions, "Request support…" (opens
+  `https://github.com/<update.repo>/issues/new?title=Add+provider:+<name>` in the default browser;
+  disabled when `update.repo` is empty) and "Dismiss" (adds the tool id to
+  `settings.dismissedSuggestions`).
+- The first time a tool is detected, one balloon: "<name> found on this PC: no usage support yet".
+  Ids already announced are kept in `settings.announcedSuggestions` so it is said once.
+
+All path and PATH probing goes through one small `Detection` helper that takes the profile folder,
+local-app-data folder and PATH string as parameters, so the self-test drives it with temp folders.

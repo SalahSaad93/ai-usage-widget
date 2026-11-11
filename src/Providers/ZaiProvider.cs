@@ -15,14 +15,16 @@ namespace AiUsageWidget.Providers
         public const string UsageUrl = "https://api.z.ai/api/monitor/usage/quota/limit";
 
         readonly string authFileOverride;
+        readonly string zcodeConfigOverride;
 
-        public ZaiProvider() : this(null) { }
+        public ZaiProvider() : this(null, null) { }
 
-        // Self-test hook: point the auth read at a temp folder so the real
-        // %USERPROFILE%\.local\share\opencode\auth.json is never touched.
-        public ZaiProvider(string authFileOverride)
+        // Self-test hooks: point the auth and ZCode-config reads at temp folders so no real
+        // user file is ever touched.
+        public ZaiProvider(string authFileOverride, string zcodeConfigOverride)
         {
             this.authFileOverride = authFileOverride;
+            this.zcodeConfigOverride = zcodeConfigOverride;
         }
 
         public string Id { get { return "zai"; } }
@@ -30,29 +32,11 @@ namespace AiUsageWidget.Providers
 
         public async Task<UsageSnapshot> FetchAsync(CancellationToken ct)
         {
-            string authPath = authFileOverride ?? DefaultAuthPath();
-            if (!File.Exists(authPath)) return NotConfigured();
-            string authJson;
-            try
-            {
-                authJson = File.ReadAllText(authPath);
-            }
-            catch (IOException)
-            {
-                return NotConfigured();
-            }
-            catch (UnauthorizedAccessException)
-            {
-                return NotConfigured();
-            }
-
-            var auth = Json.ParseObject(authJson);
-            var plan = Json.GetObject(auth, "zai-coding-plan");
-            string key = Json.GetStr(plan, "key");
-            if (string.IsNullOrEmpty(key)) return NotConfigured();
+            KeySource key = LocateKey(true);
+            if (key == null) return NotConfigured();
 
             var headers = new List<KeyValuePair<string, string>>();
-            headers.Add(new KeyValuePair<string, string>("Authorization", "Bearer " + key));
+            headers.Add(new KeyValuePair<string, string>("Authorization", "Bearer " + key.Value));
 
             HttpResponse resp;
             try
@@ -84,6 +68,74 @@ namespace AiUsageWidget.Providers
         static string DefaultAuthPath()
         {
             return DefaultAuthPath(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile));
+        }
+
+        // Pure path computation (no environment reads), reachable from the self-test.
+        public static string DefaultZcodeConfigPath(string profileFolder)
+        {
+            return Path.Combine(profileFolder, ".zcode", "cli", "config.json");
+        }
+
+        static string DefaultZcodeConfigPath()
+        {
+            return DefaultZcodeConfigPath(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile));
+        }
+
+        sealed class KeySource
+        {
+            public string Value;   // the key itself, only when wantValue; never logged or stored
+        }
+
+        // The Z.ai key sources, first match wins (spec section 13): zai-coding-plan.key in
+        // opencode's auth.json, then the ZAI_API_KEY environment variable, then
+        // provider.zai.options.apiKey in the ZCode config. One method serves both
+        // IsDetected (wantValue false: presence only, the key value is never kept) and
+        // FetchAsync (wantValue true: the key comes back for the Bearer header).
+        KeySource LocateKey(bool wantValue)
+        {
+            string authJson = Detection.ReadTextIfExists(authFileOverride ?? DefaultAuthPath());
+            if (authJson != null)
+            {
+                var plan = Json.GetObject(Json.ParseObject(authJson), "zai-coding-plan");
+                string key = Json.GetStr(plan, "key");
+                if (!string.IsNullOrEmpty(key))
+                {
+                    var found = new KeySource();
+                    if (wantValue) found.Value = key;
+                    return found;
+                }
+            }
+
+            string envKey = Environment.GetEnvironmentVariable("ZAI_API_KEY");
+            if (!string.IsNullOrEmpty(envKey))
+            {
+                var found = new KeySource();
+                if (wantValue) found.Value = envKey;
+                return found;
+            }
+
+            string configJson = Detection.ReadTextIfExists(
+                zcodeConfigOverride ?? DefaultZcodeConfigPath());
+            if (configJson != null)
+            {
+                var provider = Json.GetObject(Json.ParseObject(configJson), "provider");
+                var zai = Json.GetObject(provider, "zai");
+                var options = Json.GetObject(zai, "options");
+                string key = Json.GetStr(options, "apiKey");
+                if (!string.IsNullOrEmpty(key))
+                {
+                    var found = new KeySource();
+                    if (wantValue) found.Value = key;
+                    return found;
+                }
+            }
+            return null;
+        }
+
+        // Detected when any Z.ai key source exists (spec section 13).
+        public bool IsDetected()
+        {
+            return LocateKey(false) != null;
         }
 
         // Pure: no I/O, no clock. RefreshService stamps FetchedAtUtc.

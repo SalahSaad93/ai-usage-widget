@@ -1,8 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.ComponentModel;
-using System.Diagnostics;
-using System.IO;
 using System.Globalization;
 using System.Threading;
 using System.Threading.Tasks;
@@ -81,64 +78,20 @@ namespace AiUsageWidget.Providers
             return Parse(result.StdOut, result.ExitCode, result.StdErr);
         }
 
-        // cmd.exe /c muse usage --json: no window, stdout and stderr captured, the process
-        // tree killed after 15 s.
+        // cmd.exe /c muse usage --json through the shared hidden-process runner (spec section
+        // 14 moved the process code into Core.CliProcess; the states below are unchanged —
+        // the timeout still surfaces as ExitCode -1 with the same stderr text).
         static Task<MuseCliResult> RunCli(CancellationToken ct)
         {
             return Task.Run<MuseCliResult>(delegate
             {
-                var psi = new ProcessStartInfo();
-                psi.FileName = "cmd.exe";
-                psi.Arguments = "/c muse usage --json";
-                psi.CreateNoWindow = true;
-                psi.UseShellExecute = false;
-                psi.RedirectStandardOutput = true;
-                psi.RedirectStandardError = true;
-
-                using (Process proc = Process.Start(psi))
-                {
-                    if (proc == null) return new MuseCliResult { ExitCode = -1, StdErr = "no process" };
-                    Task<string> stdout = proc.StandardOutput.ReadToEndAsync();
-                    Task<string> stderr = proc.StandardError.ReadToEndAsync();
-                    bool exited = proc.WaitForExit(TimeoutMs);
-                    if (!exited)
-                    {
-                        KillTree(proc);
-                        return new MuseCliResult { ExitCode = -1, StdErr = "timeout after 15 s" };
-                    }
-                    return new MuseCliResult
-                    {
-                        ExitCode = proc.ExitCode,
-                        StdOut = stdout.Result ?? "",
-                        StdErr = stderr.Result ?? ""
-                    };
-                }
+                CliResult cli = CliProcess.Run("muse usage --json", TimeoutMs);
+                var result = new MuseCliResult();
+                result.ExitCode = cli.ExitCode;
+                result.StdOut = cli.StdOut;
+                result.StdErr = cli.StdErr;
+                return result;
             }, ct);
-        }
-
-        static void KillTree(Process proc)
-        {
-            try
-            {
-                var psi = new ProcessStartInfo();
-                psi.FileName = "taskkill";
-                psi.Arguments = "/PID " + proc.Id.ToString(CultureInfo.InvariantCulture) + " /T /F";
-                psi.CreateNoWindow = true;
-                psi.UseShellExecute = false;
-                using (Process killer = Process.Start(psi))
-                {
-                    if (killer != null) killer.WaitForExit(5000);
-                }
-            }
-            catch (Win32Exception)
-            {
-            }
-            catch (IOException)
-            {
-            }
-            catch (InvalidOperationException)
-            {
-            }
         }
 
         // Pure: no I/O, no clock, no process. RefreshService stamps FetchedAtUtc.

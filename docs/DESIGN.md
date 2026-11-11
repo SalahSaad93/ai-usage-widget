@@ -324,7 +324,7 @@ display name and existence-only signatures:
 |---|---|
 | Cursor | `%USERPROFILE%\.cursor` exists, or `cursor-agent` is on PATH |
 | GitHub Copilot | `%LOCALAPPDATA%\github-copilot` or `%USERPROFILE%\.config\github-copilot` exists |
-| Gemini CLI | `%USERPROFILE%\.gemini` exists, or `gemini` is on PATH |
+| Gemini CLI | `%USERPROFILE%\.gemini\oauth_creds.json` exists, or `gemini` is on PATH (the bare `.gemini` folder is also created by Antigravity, so it is not a signal) |
 | Grok Build | `%USERPROFILE%\.grok` exists, or `grok` is on PATH |
 | Antigravity | `%USERPROFILE%\.antigravity` exists, or `agy` is on PATH |
 
@@ -340,3 +340,37 @@ display name and existence-only signatures:
 
 All path and PATH probing goes through one small `Detection` helper that takes the profile folder,
 local-app-data folder and PATH string as parameters, so the self-test drives it with temp folders.
+
+## 14. Antigravity provider (`antigravity`) — NOT verified against real output
+
+Decision (2026-11-11): use only the official `agy` command. Google permits third-party tools to
+run the unmodified `agy` binary under the user's own login and forbids reading Antigravity's saved
+OAuth tokens, so this provider never touches any Antigravity credential or state file and never
+calls Google endpoints itself.
+
+- `IsDetected()`: `agy` is on PATH (`agy.exe`, `agy.cmd` or `agy.bat`). The Antigravity desktop app
+  alone does not count; in that case the existing "Antigravity" suggestion stays, and its tray
+  entry gains a third line of help text: "Install the agy CLI and sign in to see usage".
+  When the provider is detected, the Antigravity suggestion is suppressed.
+- Source: `cmd.exe /c agy -p /usage --output-format json`, no window, stdout and stderr captured,
+  20 s timeout with the process tree killed on timeout. Same injectable-runner design as
+  `MuseProvider`; share the process-running code between the two rather than copying it.
+- Exit 9009 or "is not recognized" → `NotConfigured`. A non-zero exit or output mentioning login,
+  sign in or auth → `AuthRequired` "sign in needed: run agy login". Timeout → `Error`.
+- Parsing is deliberately tolerant because the JSON shape has not been observed. Walk the whole
+  JSON tree and collect every object that has a remaining fraction (`remaining_fraction` or
+  `remainingFraction`, a number 0..1; `null` is skipped) — a "bucket". For each bucket:
+  - `UsedPercent` = (1 - fraction) × 100, clamped to 0..100.
+  - Reset time from `reset_time` / `resetTime` (ISO 8601) or, failing that, now +
+    `reset_in_seconds` / `resetInSeconds`.
+  - Kind from the bucket's own id/name fields and the keys on the path leading to it, lower-cased:
+    contains `5h`, `5-hour`, `5_hour`, `five` or `hour` → `FiveHour`; contains `week` → `Weekly`;
+    contains `month` → `Monthly`; otherwise the bucket is ignored.
+  - Antigravity has several model groups (for example Gemini and Claude/GPT), each with its own
+    5-hour and weekly bucket. The contract has one window per kind, so keep, per kind, the bucket
+    with the highest `UsedPercent` (the one closest to its limit).
+- Plan name: a top-level `tier` or `plan` string when present, otherwise empty.
+- No buckets found in valid JSON → `Error` "unexpected response". Non-JSON output → `Error`.
+- Registry order: after Z.ai GLM, before OpenCode Go.
+- Fixture `tests/fixtures/antigravity-usage-synthetic.json` is hand-written from Antigravity's
+  documented statusline fields and must be replaced by a real capture once `agy` is installed.

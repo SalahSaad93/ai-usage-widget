@@ -14,6 +14,7 @@ namespace AiUsageWidget.Core
                     new ClaudeCodeProvider(),
                     new CodexProvider(),
                     new ZaiProvider(),
+                    new AntigravityProvider(),
                     new OpenCodeGoProvider(),
                     new MuseProvider()
                 };

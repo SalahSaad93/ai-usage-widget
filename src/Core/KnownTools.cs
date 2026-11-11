@@ -41,7 +41,9 @@ namespace AiUsageWidget.Core
                     return Detection.LocalAppDataFolderExists(localAppDataFolder, "github-copilot")
                         || Detection.ProfileFolderExists(profileFolder, ".config", "github-copilot");
                 case "gemini-cli":
-                    return Detection.ProfileFolderExists(profileFolder, ".gemini")
+                    // The bare .gemini folder is also created by Antigravity (spec section 13),
+                    // so only the OAuth creds file or a PATH hit counts.
+                    return Detection.ProfileFileExists(profileFolder, ".gemini", "oauth_creds.json")
                         || Detection.OnPath(pathValue, "gemini.exe")
                         || Detection.OnPath(pathValue, "gemini.cmd")
                         || Detection.OnPath(pathValue, "gemini.bat");
@@ -67,15 +69,28 @@ namespace AiUsageWidget.Core
             return toolId;
         }
 
-        // Detected tool ids minus the dismissed ones — the suggestions.
+        // Detected tool ids minus the dismissed ones — the suggestions. coveredIds are ids a
+        // real provider now serves (spec section 14: the antigravity provider suppresses the
+        // Antigravity suggestion once the agy CLI is detected).
         public static List<string> SuggestedIds(ICollection<string> detectedIds,
-            ICollection<string> dismissedIds)
+            ICollection<string> dismissedIds, ICollection<string> coveredIds = null)
         {
             var list = new List<string>();
             if (detectedIds == null) return list;
             foreach (string id in detectedIds)
+            {
+                if (coveredIds != null && coveredIds.Contains(id)) continue;
                 if (dismissedIds == null || !dismissedIds.Contains(id)) list.Add(id);
+            }
             return list;
+        }
+
+        // Extra tray help line for a tool whose desktop app exists but whose provider is not
+        // usable yet (spec section 14). Null means the tool gets no help line.
+        public static string HelpText(string toolId)
+        {
+            if (toolId == "antigravity") return "Install the agy CLI and sign in to see usage";
+            return null;
         }
 
         // "Request support…" target for the tray submenu. An empty repo disables the item

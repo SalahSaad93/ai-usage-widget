@@ -54,6 +54,10 @@ namespace AiUsageWidget
             Check(lines, "shown_rule", ShownRule);
             Check(lines, "known_tools_suggestions", KnownToolsSuggestions);
             Check(lines, "settings_new_fields", SettingsNewFields);
+            Check(lines, "antigravity_synthetic_mapping", AntigravitySyntheticMapping);
+            Check(lines, "antigravity_tolerant_shapes", AntigravityTolerantShapes);
+            Check(lines, "antigravity_cli_states", AntigravityCliStates);
+            Check(lines, "antigravity_detection_and_suggestion", AntigravityDetectionAndSuggestion);
 
             string[] all = lines.ToArray();
             if (!string.IsNullOrEmpty(outPath)) File.WriteAllLines(outPath, all, new UTF8Encoding(false)); // no BOM: the log must start with PASS
@@ -398,7 +402,8 @@ namespace AiUsageWidget
             merged = s.MergeProviders(registry);
             That(merged.Count == registry.Length - 1, "disabled codex dropped, got " + merged.Count);
             That(merged[0].Id == "zai", "explicit list puts zai first");
-            That(merged[1].Id == "claude-code" && merged[2].Id == "opencode-go" && merged[3].Id == "muse",
+            That(merged[1].Id == "claude-code" && merged[2].Id == "antigravity" &&
+                merged[3].Id == "opencode-go" && merged[4].Id == "muse",
                 "unnamed providers append in registry order");
 
             // Saving untouched defaults must not write the merged list back: a later load
@@ -945,6 +950,17 @@ namespace AiUsageWidget
             ids = DetectedToolIds(profile, local, pathValue);
             That(ids.Contains("github-copilot") && ids.Count == 2, "copilot via local app data");
 
+            // A bare .gemini folder is created by Antigravity too, so it is not a Gemini CLI
+            // signal (spec section 13, updated row); only the creds file or PATH counts.
+            Directory.CreateDirectory(Path.Combine(profile, ".gemini", "antigravity"));
+            ids = DetectedToolIds(profile, local, pathValue);
+            That(!ids.Contains("gemini-cli") && ids.Count == 2, "bare .gemini folder is no signal");
+
+            File.WriteAllText(Path.Combine(profile, ".gemini", "oauth_creds.json"), "{}");
+            ids = DetectedToolIds(profile, local, pathValue);
+            That(ids.Contains("gemini-cli") && ids.Count == 3, "gemini via oauth_creds.json");
+            File.Delete(Path.Combine(profile, ".gemini", "oauth_creds.json"));
+
             File.WriteAllText(Path.Combine(binDir, "gemini.cmd"), "x");
             ids = DetectedToolIds(profile, local, pathValue);
             That(ids.Contains("gemini-cli") && ids.Count == 3, "gemini via PATH");
@@ -1003,6 +1019,143 @@ namespace AiUsageWidget
             s = Settings.Load(path);
             That(s.AutoDetect && s.DismissedSuggestions.Count == 3 && s.KnownProviders.Count == 2,
                 "new fields round-trip");
+        }
+
+        static void AntigravitySyntheticMapping()
+        {
+            string json = File.ReadAllText(FixturePath("antigravity-usage-synthetic.json"));
+            UsageSnapshot s = AntigravityProvider.Parse(json, 0, "",
+                new DateTime(2026, 11, 11, 12, 0, 0, DateTimeKind.Utc));
+            That(s.Status == ProviderStatus.Ok, "status should be Ok");
+            That(s.PlanName == "Pro", "tier capitalized to 'Pro', got '" + s.PlanName + "'");
+            That(s.Windows.Count == 2, "two windows expected, got " + s.Windows.Count);
+
+            // Per kind the bucket closest to its limit wins: 75 % (claude-gpt) over 38 %
+            // (gemini) for the 5-hour window, 55 % over 20 % for the weekly window; the
+            // null-fraction bucket is ignored (spec section 14).
+            UsageWindow five = WindowOf(s, WindowKind.FiveHour);
+            That(five != null && five.UsedPercent == 75, "five-hour 75 percent");
+            Near(five.ResetsAtUtc, new DateTime(2026, 11, 11, 22, 30, 0, DateTimeKind.Utc),
+                "claude 5h reset wins");
+            UsageWindow week = WindowOf(s, WindowKind.Weekly);
+            That(week != null && week.UsedPercent == 55, "weekly 55 percent");
+            Near(week.ResetsAtUtc, new DateTime(2026, 11, 15, 12, 0, 0, DateTimeKind.Utc),
+                "claude weekly reset wins");
+        }
+
+        static void AntigravityTolerantShapes()
+        {
+            // camelCase keys, buckets nested under groups[].buckets[] with the kind only in
+            // displayName, and reset_in_seconds without reset_time (spec section 14).
+            string json = "{\"plan\":\"max\",\"groups\":[{\"buckets\":[" +
+                "{\"displayName\":\"5-hour limit\",\"remainingFraction\":0.5," +
+                "\"reset_in_seconds\":600}," +
+                "{\"displayName\":\"Weekly limit\",\"remainingFraction\":0.2," +
+                "\"resetTime\":\"2026-07-01T00:00:00Z\"}]}]}";
+            var now = new DateTime(2026, 7, 1, 9, 0, 0, DateTimeKind.Utc);
+            UsageSnapshot s = AntigravityProvider.Parse(json, 0, "", now);
+            That(s.Status == ProviderStatus.Ok, "status should be Ok");
+            That(s.PlanName == "Max", "plan capitalized to 'Max', got '" + s.PlanName + "'");
+
+            UsageWindow five = WindowOf(s, WindowKind.FiveHour);
+            That(five != null && five.UsedPercent == 50, "camelCase fraction mapped");
+            Near(five.ResetsAtUtc, now.AddSeconds(600), "reset_in_seconds relative to now");
+
+            UsageWindow week = WindowOf(s, WindowKind.Weekly);
+            That(week != null && week.UsedPercent == 80, "displayName kind mapped");
+            Near(week.ResetsAtUtc, new DateTime(2026, 7, 1, 0, 0, 0, DateTimeKind.Utc),
+                "camelCase resetTime mapped");
+        }
+
+        static AntigravityProvider AgyReturning(int exitCode, string stdout, string stderr)
+        {
+            return new AntigravityProvider(delegate(CancellationToken ct)
+            {
+                var r = new CliResult();
+                r.ExitCode = exitCode;
+                r.StdOut = stdout;
+                r.StdErr = stderr;
+                return Task.FromResult(r);
+            }, null);
+        }
+
+        static void AntigravityCliStates()
+        {
+            UsageSnapshot s = AgyReturning(9009, null,
+                "'agy' is not recognized as an internal or external command")
+                .FetchAsync(CancellationToken.None).GetAwaiter().GetResult();
+            That(s.Status == ProviderStatus.NotConfigured, "CLI missing -> NotConfigured");
+
+            s = AgyReturning(1, null, "please sign in first")
+                .FetchAsync(CancellationToken.None).GetAwaiter().GetResult();
+            That(s.Status == ProviderStatus.AuthRequired, "login failure -> AuthRequired");
+            That(s.Message == "sign in needed: run agy login", "login message");
+
+            s = AgyReturning(3, null, "boom")
+                .FetchAsync(CancellationToken.None).GetAwaiter().GetResult();
+            That(s.Status == ProviderStatus.AuthRequired, "any non-zero exit -> AuthRequired");
+
+            s = AgyReturning(0, "login at https://portal.example", "")
+                .FetchAsync(CancellationToken.None).GetAwaiter().GetResult();
+            That(s.Status == ProviderStatus.AuthRequired, "auth mention on success -> AuthRequired");
+
+            s = new AntigravityProvider(delegate(CancellationToken ct)
+            {
+                var r = new CliResult();
+                r.ExitCode = -1;
+                r.TimedOut = true;
+                r.StdErr = "timeout after 20 s";
+                return Task.FromResult(r);
+            }, null).FetchAsync(CancellationToken.None).GetAwaiter().GetResult();
+            That(s.Status == ProviderStatus.Error, "timeout -> Error");
+
+            s = AgyReturning(0, "{}", "")
+                .FetchAsync(CancellationToken.None).GetAwaiter().GetResult();
+            That(s.Status == ProviderStatus.Error && s.Message == "unexpected response",
+                "valid JSON with no buckets -> unexpected response");
+
+            s = AgyReturning(0, "not json", "")
+                .FetchAsync(CancellationToken.None).GetAwaiter().GetResult();
+            That(s.Status == ProviderStatus.Error, "non-JSON -> Error");
+        }
+
+        static void AntigravityDetectionAndSuggestion()
+        {
+            string root = Path.Combine(AppPaths.DataDir, "antigravity-detect");
+            Directory.CreateDirectory(root);
+            string profile = Path.Combine(root, "profile");
+            Directory.CreateDirectory(profile);
+            string binDir = Path.Combine(root, "bin");
+            Directory.CreateDirectory(binDir);
+            string pathValue = binDir + ";C:\\nowhere";
+
+            AntigravityProvider provider = new AntigravityProvider(null, pathValue);
+            KnownTool tool = null;
+            foreach (KnownTool t in KnownTools.All())
+                if (t.Id == "antigravity") tool = t;
+
+            // Only the .antigravity desktop folder: the provider is NOT detected (no agy CLI
+            // on PATH, spec section 14) and the tool suggestion stays present.
+            Directory.CreateDirectory(Path.Combine(profile, ".antigravity"));
+            That(!provider.IsDetected(), "desktop app alone -> provider not detected");
+            That(KnownTools.IsDetected(tool, profile, null, pathValue),
+                "desktop app alone -> suggestion present");
+
+            // agy.cmd on the fake PATH: provider detected, suggestion suppressed.
+            File.WriteAllText(Path.Combine(binDir, "agy.cmd"), "x");
+            That(provider.IsDetected(), "agy.cmd on PATH -> provider detected");
+            var detected = new List<string>();
+            detected.Add("antigravity");
+            var covered = new List<string>();
+            covered.Add("antigravity");
+            List<string> suggestions = KnownTools.SuggestedIds(detected, null, covered);
+            That(!suggestions.Contains("antigravity"), "provider covers the suggestion");
+            That(KnownTools.SuggestedIds(detected, null, null).Contains("antigravity"),
+                "without coverage the suggestion stays");
+
+            That(KnownTools.HelpText("antigravity") == "Install the agy CLI and sign in to see usage",
+                "tray help line");
+            That(KnownTools.HelpText("cursor") == null, "no help line for other tools");
         }
 
     }

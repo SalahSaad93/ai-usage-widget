@@ -148,7 +148,11 @@ namespace AiUsageWidget
             foreach (KnownTool tool in KnownTools.All())
                 if (KnownTools.IsDetected(tool, profile, local, PathValue()))
                     detected.Add(tool.Id);
-            return KnownTools.SuggestedIds(detected, settings.DismissedSuggestions);
+            // The antigravity provider covers the Antigravity suggestion once the agy CLI is
+            // detected (spec section 14).
+            var covered = new List<string>();
+            if (IsProviderDetected("antigravity")) covered.Add("antigravity");
+            return KnownTools.SuggestedIds(detected, settings.DismissedSuggestions, covered);
         }
 
         string PathValue()
@@ -413,6 +417,15 @@ namespace AiUsageWidget
                 string dismissedId = toolId;
                 dismissItem.Click += delegate { DismissSuggestion(dismissedId); };
                 entry.DropDownItems.Add(dismissItem);
+                // Spec section 14: the Antigravity desktop app without the agy CLI gets a
+                // help line pointing at the CLI.
+                string helpText = KnownTools.HelpText(toolId);
+                if (helpText != null && !IsProviderDetected(toolId))
+                {
+                    var helpItem = new ToolStripMenuItem(helpText);
+                    helpItem.Enabled = false;
+                    entry.DropDownItems.Add(helpItem);
+                }
                 sugItem.DropDownItems.Add(entry);
             }
             if (suggestions.Count == 0) sugItem.Enabled = false;

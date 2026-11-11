@@ -1,0 +1,10 @@
+{
+  "tier": "pro",
+  "quota": {
+    "gemini-5h": { "remaining_fraction": 0.62, "reset_time": "2026-11-11T23:10:00Z", "reset_in_seconds": 9000 },
+    "gemini-weekly": { "remaining_fraction": 0.80, "reset_time": "2026-11-16T00:00:00Z" },
+    "claude-gpt-5h": { "remaining_fraction": 0.25, "reset_time": "2026-11-11T22:30:00Z" },
+    "claude-gpt-weekly": { "remaining_fraction": 0.45, "reset_time": "2026-11-15T12:00:00Z" },
+    "unknown-bucket": { "remaining_fraction": null, "reset_time": null }
+  }
+}

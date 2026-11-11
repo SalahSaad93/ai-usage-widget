@@ -11,11 +11,11 @@ namespace AiUsageWidget.Core
             {
                 return new IUsageProvider[]
                 {
-                    new CodexProvider(),
                     new ClaudeCodeProvider(),
+                    new CodexProvider(),
                     new ZaiProvider(),
-                    new MuseProvider(),
-                    new OpenCodeGoProvider()
+                    new OpenCodeGoProvider(),
+                    new MuseProvider()
                 };
             }
         }

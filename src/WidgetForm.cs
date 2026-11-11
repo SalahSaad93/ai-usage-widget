@@ -76,7 +76,24 @@ namespace AiUsageWidget
 
         void OnRefreshChanged()
         {
+            FitHeightToContent();
             Invalidate();
+        }
+
+        // The window is exactly as tall as its rows (as in the prototype), capped to the screen.
+        // A window sitting in the lower half of the screen keeps its bottom edge in place.
+        void FitHeightToContent()
+        {
+            List<RowVm> rows = Painter.BuildRows(refresh.Snapshots, DateTime.UtcNow, activeIds);
+            if (rows.Count == 0) return;
+            Rectangle wa = Screen.FromControl(this).WorkingArea;
+            int wanted = (int)Math.Ceiling(painter.HeaderHeight + painter.ContentHeight(mode, rows) + painter.FooterHeight);
+            int height = Math.Min(wanted, wa.Height - 32);
+            if (height == ClientSize.Height) return;
+            bool anchorBottom = Top + Height / 2 > wa.Top + wa.Height / 2;
+            int bottom = Bottom;
+            ClientSize = new Size(ClientSize.Width, height);
+            if (anchorBottom) Top = Math.Max(wa.Top, bottom - Height);
         }
 
         void Balloon(string text)
@@ -262,7 +279,10 @@ namespace AiUsageWidget
             settings.Layout = layout;
             mode = layout == "compact" ? 1 : 0;
             scroll = 0;
+            int right = Right;
             ClientSize = new Size((int)painter.S(mode == 0 ? 340 : 420), ClientSize.Height);
+            Left = Math.Max(Screen.FromControl(this).WorkingArea.Left, right - Width);   // keep the right edge in place
+            FitHeightToContent();
             SaveSettings();
             BuildMenu();
             Invalidate();
@@ -329,7 +349,7 @@ namespace AiUsageWidget
             }
             if (!latest.HasValue) return "";
             TimeSpan age = DateTime.UtcNow - latest.Value;
-            if (age.TotalSeconds < 10) return "updated just now";
+            if (age.TotalSeconds < 60) return "updated just now";
             if (age.TotalMinutes < 60) return "updated " + (int)age.TotalMinutes + " min ago";
             return "updated " + Painter.Duration(age) + " ago";
         }
@@ -354,13 +374,24 @@ namespace AiUsageWidget
                 HideToTray();
                 return;
             }
+            if (painter.DetailedRect(w, ClientSize.Height).Contains(e.Location))
+            {
+                SetLayout("detailed");
+                return;
+            }
+            if (painter.CompactRect(w, ClientSize.Height).Contains(e.Location))
+            {
+                SetLayout("compact");
+                return;
+            }
             base.OnMouseDown(e);
         }
 
         protected override void OnMouseWheel(MouseEventArgs e)
         {
             List<RowVm> rows = Painter.BuildRows(refresh.Snapshots, DateTime.UtcNow, activeIds);
-            float max = painter.ContentHeight(mode, rows) - (ClientSize.Height - painter.HeaderHeight);
+            float max = painter.ContentHeight(mode, rows)
+                - (ClientSize.Height - painter.HeaderHeight - painter.FooterHeight);
             scroll -= e.Delta / 4;
             scroll = (int)Math.Max(0, Math.Min(scroll, max));
             Invalidate();

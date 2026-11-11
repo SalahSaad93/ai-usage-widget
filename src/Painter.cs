@@ -42,6 +42,7 @@ namespace AiUsageWidget
         static readonly Color Green = FromHtml("#3FB950");
         static readonly Color Yellow = FromHtml("#D29922");
         static readonly Color Red = FromHtml("#F85149");
+        static readonly Color Accent = FromHtml("#4C8DFF");
 
         static readonly string[] WindowLabels = { "5 hours", "week", "month" };
 
@@ -172,6 +173,22 @@ namespace AiUsageWidget
             return S(8 + 18 + lines * 19 + 7 + 6);   // padding + title + lines + padding + gap
         }
 
+        public float FooterHeight
+        {
+            get { return S(30); }
+        }
+
+        // Layout switch in the footer, as in the approved prototype.
+        public RectangleF DetailedRect(float w, float h)
+        {
+            return new RectangleF(w - S(132), h - FooterHeight + S(4), S(60), S(20));
+        }
+
+        public RectangleF CompactRect(float w, float h)
+        {
+            return new RectangleF(w - S(68), h - FooterHeight + S(4), S(60), S(20));
+        }
+
         public RectangleF RefreshRect(float w)
         {
             return new RectangleF(w - S(54), S(5), S(22), S(20));
@@ -188,7 +205,7 @@ namespace AiUsageWidget
             g.SmoothingMode = SmoothingMode.AntiAlias;
             g.TextRenderingHint = TextRenderingHint.ClearTypeGridFit;
             float header = HeaderHeight;
-            var body = new RectangleF(0, header, winWidth, winHeight - header);
+            var body = new RectangleF(0, header, winWidth, winHeight - header - FooterHeight);
             float contentH = ContentHeight(mode, rows);
             int clamped = (int)Math.Max(0, Math.Min(scroll, contentH - body.Height));
             g.SetClip(body);
@@ -197,6 +214,8 @@ namespace AiUsageWidget
             g.ResetClip();
 
             DrawHeader(g, winWidth, headerNote);
+            Chip(g, "Detailed", DetailedRect(winWidth, winHeight), mode == 0);
+            Chip(g, "Compact", CompactRect(winWidth, winHeight), mode == 1);
             using (var pen = new Pen(Line)) g.DrawRectangle(pen, 0, 0, winWidth - 1, winHeight - 1);
         }
 
@@ -299,8 +318,13 @@ namespace AiUsageWidget
 
         void Chip(Graphics g, string glyph, RectangleF r)
         {
-            FillRound(g, Card, r, S(4));
-            using (var b = new SolidBrush(Dim))
+            Chip(g, glyph, r, false);
+        }
+
+        void Chip(Graphics g, string glyph, RectangleF r, bool active)
+        {
+            FillRound(g, active ? Accent : Card, r, S(4));
+            using (var b = new SolidBrush(active ? Color.White : Dim))
             using (var c = new StringFormat())
             {
                 c.Alignment = StringAlignment.Center;

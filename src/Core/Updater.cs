@@ -1,0 +1,366 @@
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Globalization;
+using System.IO;
+using System.Security.Cryptography;
+using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
+
+namespace AiUsageWidget.Core
+{
+    // GitHub Releases auto-update. The network part is separated from the pure parts (tag
+    // comparison, hash check, file swap) so the self-test can cover those without network.
+    // settings.update.repo empty -> updater disabled.
+    public sealed class Updater
+    {
+        const string AssetName = "AiUsageWidget.exe";
+
+        readonly UpdateSettings cfg;
+        readonly string runningExePath;
+        readonly Version runningVersion;
+
+        public Updater(UpdateSettings cfg, string runningExePath, Version runningVersion)
+        {
+            this.cfg = cfg;
+            this.runningExePath = runningExePath;
+            this.runningVersion = runningVersion;
+        }
+
+        public string StatusText { get; private set; }   // "" when nothing to say
+        public string PendingVersion { get; private set; }
+        public bool PendingInstall { get; private set; }
+
+        // UI hooks, all optional.
+        public Action StateChanged;         // tray tooltip / menu refresh
+        public Action<string> NotifyUser;   // balloon text
+        public Action ExitRequested;        // auto-install done: quit so the new exe takes over
+
+        public bool Enabled
+        {
+            get { return !string.IsNullOrEmpty(cfg.Repo) && cfg.Mode != "off"; }
+        }
+
+        public async Task CheckAsync()
+        {
+            if (!Enabled) return;
+            string token = null;
+            if (cfg.RequiresToken)
+            {
+                token = TokenStore.Load();
+                if (string.IsNullOrEmpty(token))
+                {
+                    SetStatus("updates: token needed");
+                    return;
+                }
+            }
+            try
+            {
+                await CheckCoreAsync(token);
+            }
+            catch (Exception)
+            {
+                SetStatus("update check failed");
+            }
+        }
+
+        async Task CheckCoreAsync(string token)
+        {
+            string apiUrl = "https://api.github.com/repos/" + cfg.Repo + "/releases/latest";
+            var headers = new List<KeyValuePair<string, string>>();
+            headers.Add(new KeyValuePair<string, string>("Accept", "application/vnd.github+json"));
+            if (!string.IsNullOrEmpty(token))
+                headers.Add(new KeyValuePair<string, string>("Authorization", "Bearer " + token));
+            HttpResponse releaseResp = await Http.GetTextAsync(apiUrl, headers.ToArray(), CancellationToken.None);
+            if (releaseResp.Status != 200)
+            {
+                SetStatus("update check failed");
+                return;
+            }
+            var release = Json.ParseObject(releaseResp.Text);
+            string tag = NormalizeTag(Json.GetStr(release, "tag_name"));
+            if (!IsNewerVersion(tag, runningVersion))
+            {
+                SetStatus("up to date");
+                return;
+            }
+
+            List<object> assets = Json.GetArray(release, "assets");
+            var exeAsset = FindAsset(assets, AssetName);
+            var metaAsset = FindAsset(assets, "latest.json");
+            if (exeAsset == null || metaAsset == null)
+            {
+                SetStatus("update check failed");
+                return;
+            }
+
+            if (!Directory.Exists(AppPaths.UpdateDir)) Directory.CreateDirectory(AppPaths.UpdateDir);
+            string newExePath = Path.Combine(AppPaths.UpdateDir, AssetName);
+            string metaPath = Path.Combine(AppPaths.UpdateDir, "latest.json");
+
+            var downloadHeaders = new List<KeyValuePair<string, string>>();
+            downloadHeaders.Add(new KeyValuePair<string, string>("Accept", "application/octet-stream"));
+            byte[] metaBytes = await DownloadAssetAsync(metaAsset, downloadHeaders, token);
+            byte[] exeBytes = await DownloadAssetAsync(exeAsset, downloadHeaders, token);
+            if (metaBytes == null || exeBytes == null)
+            {
+                SetStatus("update failed");
+                return;
+            }
+            File.WriteAllBytes(metaPath, metaBytes);
+            File.WriteAllBytes(newExePath, exeBytes);
+
+            var meta = Json.ParseObject(Encoding.UTF8.GetString(metaBytes));
+            string metaVersion = NormalizeTag(Json.GetStr(meta, "version"));
+            string sha256 = Json.GetStr(meta, "sha256");
+            string assetName = Json.GetStr(meta, "asset");
+            bool verified = metaVersion == tag
+                && assetName == AssetName
+                && VerifySha256(exeBytes, sha256);
+            if (!verified)
+            {
+                // Nothing unverified is ever executed: drop the download.
+                TryDelete(newExePath);
+                TryDelete(metaPath);
+                SetStatus("update failed");
+                return;
+            }
+
+            if (cfg.Mode == "notify")
+            {
+                PendingVersion = tag;
+                PendingInstall = true;
+                SetStatus("update available: v" + tag);
+                var notify = NotifyUser;
+                if (notify != null) notify("AI Usage Widget v" + tag + " is available");
+                return;
+            }
+            InstallPending();
+        }
+
+        // Private assets come from the asset's API url (octet-stream); public ones from
+        // browser_download_url. Only https on github hosts is requested, and the token is
+        // attached only on api.github.com (the redirect to the CDN drops it).
+        static async Task<byte[]> DownloadAssetAsync(Dictionary<string, object> asset,
+            List<KeyValuePair<string, string>> acceptHeaders, string token)
+        {
+            string url = Json.GetStr(asset, "url");
+            if (string.IsNullOrEmpty(url)) return null;
+            if (!IsAllowedUrl(url)) return null;
+            Uri uri = new Uri(url);
+            var headers = new List<KeyValuePair<string, string>>(acceptHeaders);
+            if (uri.Host == "api.github.com" && !string.IsNullOrEmpty(token))
+                headers.Add(new KeyValuePair<string, string>("Authorization", "Bearer " + token));
+            HttpResponse resp = await Http.GetBytesAsync(url, headers.ToArray(), CancellationToken.None);
+            if (resp.Status != 200 || resp.Bytes == null || resp.Bytes.Length == 0) return null;
+            return resp.Bytes;
+        }
+
+        public static bool IsAllowedUrl(string url)
+        {
+            Uri uri;
+            if (!Uri.TryCreate(url, UriKind.Absolute, out uri)) return false;
+            if (uri.Scheme != Uri.UriSchemeHttps) return false;
+            string host = uri.Host.ToLowerInvariant();
+            return host == "api.github.com"
+                || host == "github.com"
+                || host.EndsWith(".githubusercontent.com", StringComparison.Ordinal);
+        }
+
+        static Dictionary<string, object> FindAsset(List<object> assets, string name)
+        {
+            if (assets == null) return null;
+            foreach (object o in assets)
+            {
+                var d = o as Dictionary<string, object>;
+                if (d == null) continue;
+                if (Json.GetStr(d, "name") == name) return d;
+            }
+            return null;
+        }
+
+        public void InstallPending()
+        {
+            string newExePath = Path.Combine(AppPaths.UpdateDir, AssetName);
+            int pid = Process.GetCurrentProcess().Id;
+            bool swapped = false;
+            try
+            {
+                swapped = TrySwap(runningExePath, newExePath, delegate(string path)
+                {
+                    var start = new ProcessStartInfo();
+                    start.FileName = path;
+                    start.Arguments = "--updated " + pid.ToString(CultureInfo.InvariantCulture);
+                    start.UseShellExecute = false;
+                    Process.Start(start);
+                });
+            }
+            catch (Exception)
+            {
+                swapped = false;
+            }
+            if (swapped)
+            {
+                PendingInstall = false;
+                PendingVersion = null;
+                SetStatus("");
+                var exit = ExitRequested;
+                if (exit != null) exit();
+            }
+            else
+            {
+                SetStatus("update failed");
+            }
+        }
+
+        // Rename the running exe to <name>.old.exe, move the new one into place, launch it
+        // with --updated <pid>. Any failure rolls the rename back and returns false.
+        public static bool TrySwap(string runningExePath, string newExePath, Action<string> startNew)
+        {
+            string dir = Path.GetDirectoryName(runningExePath);
+            string oldPath = Path.Combine(dir,
+                Path.GetFileNameWithoutExtension(runningExePath) + ".old" + Path.GetExtension(runningExePath));
+            try
+            {
+                if (File.Exists(oldPath)) File.Delete(oldPath);
+                File.Move(runningExePath, oldPath);
+            }
+            catch (IOException)
+            {
+                return false;
+            }
+            catch (UnauthorizedAccessException)
+            {
+                return false;
+            }
+            try
+            {
+                File.Move(newExePath, runningExePath);
+            }
+            catch (IOException)
+            {
+                Rollback(oldPath, runningExePath);
+                return false;
+            }
+            catch (UnauthorizedAccessException)
+            {
+                Rollback(oldPath, runningExePath);
+                return false;
+            }
+            try
+            {
+                startNew(runningExePath);
+                return true;
+            }
+            catch (Exception)
+            {
+                // Put the new exe back where the download left it, then the old one at the
+                // running path: a failed launch loses nothing and the install can be retried.
+                try
+                {
+                    File.Move(runningExePath, newExePath);
+                }
+                catch (IOException)
+                {
+                    TryDelete(runningExePath);
+                }
+                catch (UnauthorizedAccessException)
+                {
+                    TryDelete(runningExePath);
+                }
+                Rollback(oldPath, runningExePath);
+                return false;
+            }
+        }
+
+        // Runs in the NEW process (argv --updated <oldPid>): wait for the old process to
+        // exit, then delete the .old file.
+        public static void FinishUpdate(int oldPid)
+        {
+            string oldPath = AppPaths.OldExePath;
+            if (oldPid > 0)
+            {
+                try
+                {
+                    using (Process old = Process.GetProcessById(oldPid))
+                    {
+                        old.WaitForExit(20000);
+                    }
+                }
+                catch (ArgumentException)
+                {
+                    // already gone
+                }
+            }
+            TryDelete(oldPath);
+        }
+
+        // "v0.2.0" -> "0.2.0"
+        public static string NormalizeTag(string tag)
+        {
+            if (tag == null) return "";
+            tag = tag.Trim();
+            if (tag.Length > 0 && (tag[0] == 'v' || tag[0] == 'V')) tag = tag.Substring(1);
+            return tag.Trim();
+        }
+
+        // Strictly newer only; garbage -> false.
+        public static bool IsNewerVersion(string candidateTag, Version running)
+        {
+            if (running == null) return false;
+            Version candidate;
+            if (!Version.TryParse(NormalizeTag(candidateTag), out candidate)) return false;
+            return candidate.CompareTo(running) > 0;
+        }
+
+        public static bool VerifySha256(byte[] data, string expectedHex)
+        {
+            if (data == null || string.IsNullOrEmpty(expectedHex)) return false;
+            string actual;
+            using (SHA256 sha = SHA256.Create())
+            {
+                byte[] hash = sha.ComputeHash(data);
+                var sb = new StringBuilder(hash.Length * 2);
+                foreach (byte b in hash) sb.Append(b.ToString("x2", CultureInfo.InvariantCulture));
+                actual = sb.ToString();
+            }
+            return string.Equals(actual, expectedHex.Trim(), StringComparison.OrdinalIgnoreCase);
+        }
+
+        static void Rollback(string oldPath, string runningExePath)
+        {
+            try
+            {
+                if (!File.Exists(runningExePath) && File.Exists(oldPath)) File.Move(oldPath, runningExePath);
+            }
+            catch (IOException)
+            {
+            }
+            catch (UnauthorizedAccessException)
+            {
+            }
+        }
+
+        static void TryDelete(string path)
+        {
+            try
+            {
+                if (File.Exists(path)) File.Delete(path);
+            }
+            catch (IOException)
+            {
+            }
+            catch (UnauthorizedAccessException)
+            {
+            }
+        }
+
+        void SetStatus(string text)
+        {
+            StatusText = text ?? "";
+            var changed = StateChanged;
+            if (changed != null) changed();
+        }
+    }
+}

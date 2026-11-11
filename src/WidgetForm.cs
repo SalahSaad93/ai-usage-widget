@@ -110,7 +110,7 @@ namespace AiUsageWidget
             refreshTimer.Interval = settings.RefreshMinutes * 60000;
             refreshTimer.Tick += OnRefreshTimer;
             minuteTimer.Interval = 60000;   // re-render "updated ... ago", stale tags, reset times
-            minuteTimer.Tick += delegate { Invalidate(); };
+            minuteTimer.Tick += delegate { Invalidate(); TrimMemory(); };
             updateTimer.Interval = 24 * 60 * 60000;
             updateTimer.Tick += OnUpdateTimer;
             refreshTimer.Start();
@@ -126,6 +126,17 @@ namespace AiUsageWidget
         void OnUpdateTimer(object sender, EventArgs e)
         {
             RunCheck();
+        }
+
+        [System.Runtime.InteropServices.DllImport("kernel32.dll")]
+        static extern bool SetProcessWorkingSetSize(IntPtr process, IntPtr min, IntPtr max);
+
+        // Hands pages the widget is not using back to Windows. The HTTP stack leaves the
+        // working set well above what an idle widget needs after each refresh.
+        static void TrimMemory()
+        {
+            GC.Collect();
+            SetProcessWorkingSetSize(System.Diagnostics.Process.GetCurrentProcess().Handle, (IntPtr)(-1), (IntPtr)(-1));
         }
 
         async void RunRefresh(bool manual)
@@ -153,7 +164,8 @@ namespace AiUsageWidget
 
         void InitTray()
         {
-            tray.Icon = SystemIcons.Application;
+            using (System.IO.Stream icon = typeof(WidgetForm).Assembly.GetManifestResourceStream("AiUsageWidget.app.ico"))
+                tray.Icon = icon == null ? SystemIcons.Application : new Icon(icon, SystemInformation.SmallIconSize);
             tray.Text = TrayText();
             tray.Visible = true;
             tray.DoubleClick += delegate { ShowAndActivate(); };

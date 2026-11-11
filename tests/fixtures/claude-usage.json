@@ -1,0 +1,11 @@
+{
+  "five_hour": { "utilization": 17.0, "resets_at": "2026-11-11T21:40:00.908682+00:00", "limit_dollars": null, "used_dollars": null },
+  "seven_day": { "utilization": 54.0, "resets_at": "2026-11-16T19:00:00.908707+00:00", "limit_dollars": null, "used_dollars": null },
+  "seven_day_opus": null,
+  "seven_day_sonnet": null,
+  "extra_usage": { "is_enabled": false, "monthly_limit": null, "used_credits": null, "utilization": null },
+  "limits": [
+    { "kind": "session", "group": "session", "percent": 17, "severity": "normal", "resets_at": "2026-11-11T21:40:00.908682+00:00", "scope": null, "is_active": false },
+    { "kind": "weekly_all", "group": "weekly", "percent": 54, "severity": "normal", "resets_at": "2026-11-16T19:00:00.908707+00:00", "scope": null, "is_active": true }
+  ]
+}

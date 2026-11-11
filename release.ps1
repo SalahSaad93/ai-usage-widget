@@ -42,7 +42,13 @@ $latest = [pscustomobject]@{
 $latestPath = Join-Path $root "bin\latest.json"
 $latest | ConvertTo-Json | Set-Content -Path $latestPath -Encoding ASCII
 
-& gh release create ("v" + $Version) $exe $latestPath
+Push-Location $root
+try {
+    & gh release create ("v" + $Version) $exe $latestPath --title ("v" + $Version) --notes ("AI Usage Widget v" + $Version) --target (git rev-parse HEAD)
+}
+finally {
+    Pop-Location
+}
 if ($LASTEXITCODE -ne 0) {
     Write-Error "gh release create failed"
     exit 1

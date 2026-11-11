@@ -36,6 +36,15 @@ namespace AiUsageWidget
             Check(lines, "hash_mismatch_rejection", HashMismatchRejection);
             Check(lines, "exe_swap_and_rollback", ExeSwapAndRollback);
             Check(lines, "token_store_round_trip", TokenStoreRoundTrip);
+            Check(lines, "claude_fixture_mapping", ClaudeFixtureMapping);
+            Check(lines, "claude_plan_names", ClaudePlanNames);
+            Check(lines, "claude_auth_states", ClaudeAuthStates);
+            Check(lines, "zai_fixture_mapping", ZaiFixtureMapping);
+            Check(lines, "zai_auth_and_missing", ZaiAuthAndMissing);
+            Check(lines, "muse_empty_allowance", MuseEmptyAllowance);
+            Check(lines, "muse_synthetic_mapping", MuseSyntheticMapping);
+            Check(lines, "muse_cli_states", MuseCliStates);
+            Check(lines, "opencode_go_not_configured", OpenCodeGoNotConfigured);
 
             string[] all = lines.ToArray();
             if (!string.IsNullOrEmpty(outPath)) File.WriteAllLines(outPath, all, new UTF8Encoding(false)); // no BOM: the log must start with PASS
@@ -325,7 +334,7 @@ namespace AiUsageWidget
             That(s.Bounds.Width == 340 && s.Bounds.Height == 560, "default bounds");
             That(s.Providers.Count == 1 && s.Providers[0].Id == "codex" && s.Providers[0].Enabled,
                 "default providers");
-            That(s.Update.Mode == "auto" && s.Update.Repo == "" && s.Update.RequiresToken,
+            That(s.Update.Mode == "auto" && s.Update.Repo == "SalahSaad93/ai-usage-widget" && s.Update.RequiresToken,
                 "update defaults");
 
             File.WriteAllText(path, "{\"refreshMinutes\":0,\"custom\":\"keep\"," +
@@ -422,5 +431,184 @@ namespace AiUsageWidget
             TokenStore.Clear();
             That(TokenStore.Load() == null, "cleared");
         }
+
+        static DateTime EpochMs(double ms)
+        {
+            return new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc).AddMilliseconds(ms);
+        }
+
+        static DateTime EpochBase(int y, int mo, int d, int h, int mi)
+        {
+            return new DateTime(y, mo, d, h, mi, 0, DateTimeKind.Utc);
+        }
+
+        static UsageWindow WindowOf(UsageSnapshot s, WindowKind kind)
+        {
+            foreach (UsageWindow w in s.Windows)
+                if (w.Kind == kind) return w;
+            return null;
+        }
+
+        static void Near(DateTime? actual, DateTime expected, string what)
+        {
+            That(actual.HasValue, what + " present");
+            That(Math.Abs((actual.Value - expected).TotalMilliseconds) < 1,
+                what + " value");
+            That(actual.Value.Kind == DateTimeKind.Utc, what + " is UTC");
+        }
+
+        static void ClaudeFixtureMapping()
+        {
+            string json = File.ReadAllText(FixturePath("claude-usage.json"));
+            UsageSnapshot s = ClaudeCodeProvider.Parse(json, "Max 5x");
+            That(s.Status == ProviderStatus.Ok, "status should be Ok");
+            That(s.PlanName == "Max 5x", "plan name passes through, got '" + s.PlanName + "'");
+            That(s.Windows.Count == 2, "two windows expected, got " + s.Windows.Count);
+            UsageWindow five = WindowOf(s, WindowKind.FiveHour);
+            That(five != null && five.UsedPercent == 17, "five-hour utilization 17");
+            Near(five.ResetsAtUtc, EpochBase(2026, 11, 11, 21, 40).AddMilliseconds(908.682),
+                "five-hour reset");
+            UsageWindow week = WindowOf(s, WindowKind.Weekly);
+            That(week != null && week.UsedPercent == 54, "weekly utilization 54");
+            Near(week.ResetsAtUtc, EpochBase(2026, 11, 16, 19, 0).AddMilliseconds(908.707),
+                "weekly reset");
+            That(WindowOf(s, WindowKind.Monthly) == null, "no monthly window");
+        }
+
+        static void ClaudePlanNames()
+        {
+            string tpl = "{\"claudeAiOauth\":{\"subscriptionType\":\"SUB\"," +
+                "\"rateLimitTier\":\"TIER\"}}";
+            That(ClaudeCodeProvider.PlanNameOf(tpl.Replace("SUB", "max").Replace("TIER", "claude_max_5x")) == "Max 5x",
+                "max 5x tier");
+            That(ClaudeCodeProvider.PlanNameOf(tpl.Replace("SUB", "max").Replace("TIER", "claude_max_20x")) == "Max 20x",
+                "max 20x tier");
+            That(ClaudeCodeProvider.PlanNameOf(tpl.Replace("SUB", "max").Replace("TIER", "claude_max")) == "Max",
+                "max without tier");
+            That(ClaudeCodeProvider.PlanNameOf(tpl.Replace("SUB", "pro").Replace("TIER", "")) == "Pro", "pro plan");
+            That(ClaudeCodeProvider.PlanNameOf(tpl.Replace("SUB", "team").Replace("TIER", "")) == "Team",
+                "raw value capitalized");
+        }
+
+        static void ClaudeAuthStates()
+        {
+            string dir = Path.Combine(AppPaths.DataDir, "claude-home");
+            Directory.CreateDirectory(dir);
+            string cred = Path.Combine(dir, "credentials.json");
+            ClaudeCodeProvider p = new ClaudeCodeProvider(cred);
+
+            UsageSnapshot s = p.FetchAsync(CancellationToken.None).GetAwaiter().GetResult();
+            That(s.Status == ProviderStatus.NotConfigured, "missing file -> NotConfigured");
+
+            File.WriteAllText(cred,
+                "{\"claudeAiOauth\":{\"accessToken\":\"tok\",\"expiresAt\":1000}}");
+            s = p.FetchAsync(CancellationToken.None).GetAwaiter().GetResult();
+            That(s.Status == ProviderStatus.AuthRequired,
+                "expired login -> AuthRequired with no network call");
+            That(s.Message == "sign in needed: open Claude Code", "expired login message");
+        }
+
+        static void ZaiFixtureMapping()
+        {
+            string json = File.ReadAllText(FixturePath("zai-quota.json"));
+            UsageSnapshot s = ZaiProvider.Parse(json);
+            That(s.Status == ProviderStatus.Ok, "status should be Ok");
+            That(s.PlanName == "Coding Lite", "plan should be Coding Lite, got '" + s.PlanName + "'");
+            That(s.Windows.Count == 3, "three windows expected, got " + s.Windows.Count);
+            UsageWindow five = WindowOf(s, WindowKind.FiveHour);
+            That(five != null && five.UsedPercent == 8, "five-hour 8 percent");
+            Near(five.ResetsAtUtc, EpochMs(1794433677039), "five-hour reset");
+            UsageWindow week = WindowOf(s, WindowKind.Weekly);
+            That(week != null && week.UsedPercent == 92, "weekly 92 percent");
+            Near(week.ResetsAtUtc, EpochMs(1794598684997), "weekly reset");
+            UsageWindow month = WindowOf(s, WindowKind.Monthly);
+            That(month != null && month.UsedPercent == 7, "monthly 7 percent");
+            That(month.Used.HasValue && month.Used.Value == 7, "monthly used 7");
+            That(month.Limit.HasValue && month.Limit.Value == 100, "monthly limit 100");
+            Near(month.ResetsAtUtc, EpochMs(1794484611982), "monthly reset");
+        }
+
+        static void ZaiAuthAndMissing()
+        {
+            UsageSnapshot s = ZaiProvider.Parse(
+                "{\"success\":false,\"code\":401,\"msg\":\"unauthorized\"}");
+            That(s.Status == ProviderStatus.AuthRequired, "200 body with code 401 -> AuthRequired");
+            That(s.Message == "sign in needed: check Z.ai key", "auth message");
+
+            string dir = Path.Combine(AppPaths.DataDir, "zai-home");
+            string missing = Path.Combine(dir, "auth.json");
+            ZaiProvider p = new ZaiProvider(missing);
+            s = p.FetchAsync(CancellationToken.None).GetAwaiter().GetResult();
+            That(s.Status == ProviderStatus.NotConfigured, "missing key file -> NotConfigured");
+        }
+
+        static void MuseEmptyAllowance()
+        {
+            string json = File.ReadAllText(FixturePath("muse-usage-empty.json"));
+            UsageSnapshot s = MuseProvider.Parse(json, 0, "");
+            That(s.Status == ProviderStatus.Ok, "empty allowance is Ok, not an error");
+            That(s.Windows.Count == 0, "no windows");
+            That(s.Message == "no usage yet in this window", "spec message");
+
+            // The painter draws an Ok row with no windows as its message, like NotConfigured.
+            var one = new List<UsageSnapshot>();
+            one.Add(s);
+            List<RowVm> rows = Painter.BuildRows(one, DateTime.UtcNow, null);
+            That(rows.Count == 1 && rows[0].Msg == "no usage yet in this window",
+                "BuildRows exposes the message for an Ok row with no windows");
+        }
+
+        static void MuseSyntheticMapping()
+        {
+            string json = File.ReadAllText(FixturePath("muse-usage-synthetic.json"));
+            UsageSnapshot s = MuseProvider.Parse(json, 0, "");
+            That(s.Status == ProviderStatus.Ok, "status should be Ok");
+            That(s.PlanName == "Pro", "tier capitalized to 'Pro', got '" + s.PlanName + "'");
+            That(s.Windows.Count == 2, "two windows expected, got " + s.Windows.Count);
+            UsageWindow five = WindowOf(s, WindowKind.FiveHour);
+            That(five != null && five.UsedPercent == 41, "five-hour 41 percent");
+            Near(five.ResetsAtUtc, EpochMs(1794433677000), "five-hour reset");
+            UsageWindow week = WindowOf(s, WindowKind.Weekly);
+            That(week != null && week.UsedPercent == 63, "weekly 63 percent");
+            Near(week.ResetsAtUtc, EpochMs(1794598684000), "weekly reset");
+        }
+
+        static MuseProvider MuseReturning(int exitCode, string stdout, string stderr)
+        {
+            return new MuseProvider(delegate(CancellationToken ct)
+            {
+                var r = new MuseCliResult();
+                r.ExitCode = exitCode;
+                r.StdOut = stdout;
+                r.StdErr = stderr;
+                return Task.FromResult(r);
+            });
+        }
+
+        static void MuseCliStates()
+        {
+            UsageSnapshot s = MuseReturning(9009, null,
+                "'muse' is not recognized as an internal or external command")
+                .FetchAsync(CancellationToken.None).GetAwaiter().GetResult();
+            That(s.Status == ProviderStatus.NotConfigured, "CLI missing -> NotConfigured");
+
+            s = MuseReturning(1, null, "run muse login first")
+                .FetchAsync(CancellationToken.None).GetAwaiter().GetResult();
+            That(s.Status == ProviderStatus.AuthRequired, "login exit -> AuthRequired");
+            That(s.Message == "sign in needed: run muse login", "login message");
+
+            s = MuseReturning(3, null, "kaboom")
+                .FetchAsync(CancellationToken.None).GetAwaiter().GetResult();
+            That(s.Status == ProviderStatus.Error, "other failure -> Error");
+        }
+
+        static void OpenCodeGoNotConfigured()
+        {
+            UsageSnapshot s = new OpenCodeGoProvider()
+                .FetchAsync(CancellationToken.None).GetAwaiter().GetResult();
+            That(s.Status == ProviderStatus.NotConfigured, "opencode-go -> NotConfigured");
+            That(s.Message == "no usage API from vendor", "spec message");
+        }
+
     }
 }

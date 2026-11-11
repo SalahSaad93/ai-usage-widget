@@ -52,7 +52,12 @@ $log = Join-Path $bin "selftest.log"
 # Windows PowerShell 5.1 splits a computed element ("x" + expr) inside a multi-line array
 # literal into two elements, so csc would see /win32manifest: with no value. Precompute it.
 $manifestArg = "/win32manifest:" + (Join-Path $root "app.manifest")
+$iconPath = Join-Path $root "assets\app.ico"
+$iconArg = "/win32icon:" + $iconPath                       # exe icon
+$iconResArg = "/resource:" + $iconPath + ",AiUsageWidget.app.ico"   # tray icon, loaded at tray size
 $cscArgs = @(
+    $iconArg,
+    $iconResArg,
     "/nologo",
     "/noconfig",
     "/langversion:5",

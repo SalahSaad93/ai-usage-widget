@@ -125,6 +125,8 @@ namespace AiUsageWidget
                     row.Msg = "stale " + Duration(nowUtc - sn.FetchedAtUtc);
                 else if (sn.Status != ProviderStatus.Ok)
                     row.Msg = string.IsNullOrEmpty(sn.Message) ? sn.Status.ToString() : sn.Message;
+                else if (sn.Windows.Count == 0)
+                    row.Msg = string.IsNullOrEmpty(sn.Message) ? "no usage reported" : sn.Message;
                 foreach (UsageWindow w in sn.Windows)
                 {
                     var vm = new WindowVm();
@@ -163,10 +165,10 @@ namespace AiUsageWidget
         {
             if (mode == 1) return S(24);
             int lines;
-            if (r.Status == ProviderStatus.Ok || r.Status == ProviderStatus.Stale)
+            if (r.Windows.Count > 0)
                 lines = r.Windows.Count;
             else
-                lines = 1;   // auth / not-configured / error: one message line
+                lines = 1;   // message rows: auth / not-configured / error / Ok-with-message
             return S(8 + 18 + lines * 19 + 7 + 6);   // padding + title + lines + padding + gap
         }
 
@@ -220,7 +222,7 @@ namespace AiUsageWidget
                 Title(g, r, new RectangleF(x0, ly, x1 - x0, S(18)));
                 ly += S(18);
                 bool dim = r.Status == ProviderStatus.Stale;
-                if (r.Status == ProviderStatus.Ok || r.Status == ProviderStatus.Stale)
+                if (r.Windows.Count > 0)
                 {
                     foreach (WindowVm wnd in r.Windows)
                     {
@@ -256,7 +258,7 @@ namespace AiUsageWidget
             {
                 Title(g, r, new RectangleF(x0, y, cols - x0, S(24)));
                 bool dim = r.Status == ProviderStatus.Stale;
-                if (r.Status == ProviderStatus.Ok || r.Status == ProviderStatus.Stale)
+                if (r.Windows.Count > 0)
                 {
                     for (int i = 0; i < 3; i++)
                     {

@@ -60,7 +60,7 @@ namespace AiUsageWidget.Core
         public UpdateSettings()
         {
             Mode = "auto";
-            Repo = "";
+            Repo = "SalahSaad93/ai-usage-widget";
             RequiresToken = true;
         }
     }

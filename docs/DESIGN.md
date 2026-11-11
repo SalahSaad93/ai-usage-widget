@@ -223,11 +223,57 @@ exe swap and rollback in a temp folder; token store round-trip.
 3. Save a real response with identifiers redacted under `tests/fixtures/` and add self-test checks.
 4. Follow the token rule in section 7: read, use, forget; never refresh or write.
 
-Starting points for the current stubs, each to be verified with one live call before coding:
+## 12. Other providers (verified 2026-11-11)
 
-| Provider | Local login source |
-|---|---|
-| Claude Code | `%USERPROFILE%\.claude\.credentials.json` → `claudeAiOauth` |
-| Z.ai GLM | `%USERPROFILE%\.local\share\opencode\auth.json` → `zai-coding-plan` |
-| OpenCode Go | same file → `opencode-go` |
-| Muse | `%USERPROFILE%\.config\muse\auth.json` → `providers` |
+All follow sections 3 and 7. Each has a pure `Parse` and a fixture under `tests/fixtures/`.
+
+### Claude Code (`claude-code`)
+
+- Login: `%USERPROFILE%\.claude\.credentials.json` → `claudeAiOauth.accessToken`. Missing →
+  `NotConfigured`. `claudeAiOauth.expiresAt` (epoch ms) in the past → `AuthRequired`
+  "sign in needed: open Claude Code", without a network call (these logins last about 8 hours).
+- `GET https://api.anthropic.com/api/oauth/usage`, headers `Authorization: Bearer <token>`,
+  `anthropic-beta: oauth-2025-04-20`. 401/403 → `AuthRequired` (same message).
+- Map: `five_hour.utilization` → `FiveHour`, `seven_day.utilization` → `Weekly`; `resets_at` is
+  ISO 8601 with offset. A `null` block is absent. Other keys are ignored.
+- Plan name from the credentials file, not the response: `subscriptionType` `max` with
+  `rateLimitTier` containing `5x` → "Max 5x", `20x` → "Max 20x", otherwise "Max"; `pro` → "Pro";
+  anything else → the raw value with a capital first letter.
+
+### Z.ai GLM (`zai`)
+
+- Login: `%USERPROFILE%\.local\share\opencode\auth.json` → `zai-coding-plan.key`. Missing →
+  `NotConfigured`.
+- `GET https://api.z.ai/api/monitor/usage/quota/limit`, header `Authorization: Bearer <key>`.
+  HTTP 401/403, or a 200 body with `success` false and `code` 401 → `AuthRequired`
+  "sign in needed: check Z.ai key".
+- Map each entry of `data.limits`: `type` `TOKENS_LIMIT` with `unit` 3 → `FiveHour`, `unit` 6 →
+  `Weekly`; `type` `TIME_LIMIT` → `Monthly` (this is the monthly web-tool quota; `currentValue` →
+  `Used`, `usage` → `Limit`). `percentage` → `UsedPercent`, `nextResetTime` (epoch ms) →
+  `ResetsAtUtc`. Anything else is ignored.
+- Plan name: `data.level` `lite` → "Coding Lite", `pro` → "Coding Pro", `max` → "Coding Max",
+  otherwise the raw value.
+
+### Muse (`muse`)
+
+- Source: the official CLI command `muse usage --json`, run as `cmd.exe /c muse usage --json` with
+  no window, stdout captured, 15 s timeout (kill the process tree on timeout). The CLI renews its
+  own login, so this provider never reads Muse's token. CLI not found → `NotConfigured`.
+- Output `{"schemaVersion":1,"allowance":{...}|null,"reason":...,"hint":...}`.
+  - `allowance` null with `reason` `server_sent_no_usage` → `Ok`, no windows, message
+    "no usage yet in this window".
+  - `allowance` null with any other reason, or a non-zero exit code mentioning login → `AuthRequired`
+    "sign in needed: run muse login"; otherwise `Error` with the reason.
+  - `allowance` object: `tier` → `PlanName` (capital first letter); `window.usedPercent` with
+    `window.windowDurationMins` 300 → `FiveHour` (other durations ignored);
+    `weekly.usedPercent` → `Weekly`; `resetsAtMs` (epoch ms) → `ResetsAtUtc`.
+  - The populated shape is taken from Muse's exported wire schema (`SubscriptionUsage`) and has
+    not been observed live; `tests/fixtures/muse-usage-synthetic.json` is hand-written from it.
+
+### OpenCode Go (`opencode-go`)
+
+The vendor has no usage API: limits are visible only in the web console, and the API key is
+rejected by every usage route tried. The provider returns `NotConfigured` with the message
+"no usage API from vendor". Replace it when one exists.
+
+An `Ok` snapshot with no windows draws its `Message` dim in place of the bars.

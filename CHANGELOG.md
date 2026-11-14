@@ -3,6 +3,61 @@
 All notable changes to this project are documented in this file. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.4.0] - 2026-11-14
+
+### Added
+
+- OpenRouter, Cursor and GitHub Copilot providers. OpenRouter uses its documented key endpoint.
+  Cursor and Copilot read the local sign-in and call unofficial endpoints, so both are
+  experimental and shown only when explicitly enabled under Subscriptions.
+- Generalised usage windows: a window carries a key, label, duration, unit and a primary flag,
+  and one row can list several windows. Claude Code reports the Opus and Sonnet weekly limits and
+  extra usage, Codex its code-review limits, Z.ai labels its web-tools quota. Detailed lists every
+  window with used/limit numbers; Compact builds its columns from the primary windows.
+- A settings window, opened with **Settings…** in the widget or tray menu: refresh, layout,
+  theme, opacity, colour thresholds, subscriptions, an OpenRouter key, notifications and updates.
+- A first-run window: you choose which subscriptions to follow, and nothing is fetched until you
+  continue.
+- Local usage history (`history.json`), kept for `historyDays` days (default 30). It feeds a pace
+  marker on every bar and a forecast — "limit in 1h 20m" — shown when a window reaches its limit
+  before it resets.
+- Threshold notifications: the tray announces when a window crosses 80 % or 95 % (configurable)
+  and when a window resets.
+- The tray icon fills and changes colour with the worst window, and its tooltip lists the worst
+  windows.
+- Light and dark themes that can follow Windows, tooltips with exact numbers and reset times, a
+  menu on right-click or the new header button, and rounded corners and a shadow on Windows 11.
+- A DPAPI-backed secret store: a key you enter in settings (currently the OpenRouter key) is
+  stored encrypted in `secret-*.bin`.
+- Continuous integration: every push and pull request builds the exe and runs the self-tests on
+  Windows.
+- Issue templates for bug reports and provider requests.
+
+### Changed
+
+- Settings gained keys for theme, colour thresholds, opacity, notification thresholds, history
+  retention and secrets.
+- The build is AnyCPU, so the exe also runs natively on ARM64.
+- A single click on the tray icon toggles the widget, and the first hide explains the tray.
+- New installs no longer need a GitHub token.
+
+### Fixed
+
+- A stalled response body can no longer hang a refresh, and a provider that ignores its deadline
+  is abandoned after a short grace period.
+- A CLI run cancelled while draining its pipes reports the cancellation instead of a bogus
+  result.
+
+### Security
+
+- Updates now require a signed manifest: `latest.json` must carry an RSA signature made with the
+  key whose public half is compiled into the exe, and the signature is checked before the version
+  and hash. A build without a key disables update checks entirely.
+- The updater installs the exact bytes it just verified instead of re-reading the file, and the
+  hash is re-verified right before the swap.
+- `release.ps1` signs and verifies the manifest; `tools/new-update-key.ps1` creates the signing
+  key pair.
+
 ## [0.3.2] - 2026-11-14
 
 ### Added

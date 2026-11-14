@@ -71,6 +71,8 @@ namespace AiUsageWidget
             Check(lines, "claude_extra_windows", ClaudeExtraWindows);
             Check(lines, "codex_review_windows", CodexReviewWindows);
             Check(lines, "painter_extended_rows_and_columns", PainterExtendedRowsAndColumns);
+            Check(lines, "update_signature_verifies", UpdateSignatureVerifies);
+            Check(lines, "unsigned_build_disables_updates", UnsignedBuildDisablesUpdates);
 
             string[] all = lines.ToArray();
             if (!string.IsNullOrEmpty(outPath)) File.WriteAllLines(outPath, all, new UTF8Encoding(false)); // no BOM: the log must start with PASS
@@ -365,7 +367,7 @@ namespace AiUsageWidget
             That(s.RefreshMinutes == 5 && s.Layout == "detailed" && s.AlwaysOnTop, "defaults");
             That(s.Bounds.Width == 340 && s.Bounds.Height == 560, "default bounds");
             That(s.Providers.Count == 0, "default providers list is empty -> registry order");
-            That(s.Update.Mode == "notify" && s.Update.Repo == "SalahSaad93/ai-usage-widget" && s.Update.RequiresToken,
+            That(s.Update.Mode == "notify" && s.Update.Repo == "SalahSaad93/ai-usage-widget" && !s.Update.RequiresToken,
                 "update defaults");
 
             File.WriteAllText(path, "{\"refreshMinutes\":0,\"custom\":\"keep\"," +
@@ -1658,6 +1660,35 @@ namespace AiUsageWidget
                 var daily = new List<RowVm> { new RowVm() }; daily[0].Windows.Add(new WindowVm { Kind = WindowKind.Daily, Primary = true });
                 That(painter.CompactWidthFor(daily) == painter.S(420), "daily column");
             }
+        }
+
+        static void UpdateSignatureVerifies()
+        {
+            byte[] manifest = Encoding.UTF8.GetBytes("{\"version\":\"0.4.0\"}");
+            byte[] signature;
+            string publicKey;
+            using (var rsa = new RSACryptoServiceProvider(3072))
+            {
+                publicKey = rsa.ToXmlString(false);
+                signature = rsa.SignData(manifest, CryptoConfig.MapNameToOID("SHA256"));
+            }
+            string signatureBase64 = Convert.ToBase64String(signature);
+            That(Updater.VerifySignature(manifest, signatureBase64, publicKey), "valid signature");
+            That(!Updater.VerifySignature(Encoding.UTF8.GetBytes("tampered"), signatureBase64, publicKey), "tampered manifest");
+            That(!Updater.VerifySignature(manifest, Convert.ToBase64String(new byte[] { 1, 2, 3 }), publicKey), "tampered signature");
+            using (var wrong = new RSACryptoServiceProvider(3072))
+                That(!Updater.VerifySignature(manifest, signatureBase64, wrong.ToXmlString(false)), "wrong key");
+            That(!Updater.VerifySignature(manifest, signatureBase64, ""), "empty key");
+            That(!Updater.VerifySignature(manifest, "not base64!", publicKey), "garbage Base64");
+        }
+
+        static void UnsignedBuildDisablesUpdates()
+        {
+            var cfg = new UpdateSettings();
+            cfg.Mode = "auto";
+            var updater = new Updater(cfg, "unused.exe", new Version(0, 1), "");
+            updater.CheckAsync().GetAwaiter().GetResult();
+            That(updater.StatusText == "updates disabled (unsigned build)", "unsigned status");
         }
 
     }

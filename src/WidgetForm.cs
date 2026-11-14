@@ -426,8 +426,9 @@ namespace AiUsageWidget
                 }
                 await refresh.RunOnceAsync(manual);
             }
-            catch (Exception)
+            catch (Exception ex)
             {
+                Log.Error("refresh failed", ex);
                 // a refresh must never take the widget down
             }
         }
@@ -446,8 +447,9 @@ namespace AiUsageWidget
             {
                 await updater.CheckAsync();
             }
-            catch (Exception)
+            catch (Exception ex)
             {
+                Log.Error("update check failed", ex);
             }
         }
 
@@ -818,6 +820,11 @@ namespace AiUsageWidget
             const int WM_DPICHANGED = 0x02E0;
             const int WM_NCLBUTTONDBLCLK = 0x00A3;
             if (m.Msg == WM_NCLBUTTONDBLCLK) return;
+            if (m.Msg == Program.ShowMessageId)
+            {
+                ShowAndActivate();   // a second launch asks the running widget to show itself
+                return;
+            }
             if (m.Msg == WM_DPICHANGED)
             {
                 HandleDpiChanged(m);

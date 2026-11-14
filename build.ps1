@@ -1,5 +1,7 @@
 param(
     [string]$Version = "0.1.0",
+    # Relative to the repo root. Use bin\dev while an installed widget is running from bin\.
+    [string]$OutDir = "bin",
     [switch]$Run
 )
 
@@ -12,7 +14,7 @@ if ($Version -notmatch '^\d+\.\d+\.\d+$') {
 
 $root = $PSScriptRoot
 if (-not $root) { $root = Split-Path -Parent $MyInvocation.MyCommand.Path }
-$bin = Join-Path $root "bin"
+$bin = Join-Path $root $OutDir
 New-Item -ItemType Directory -Force -Path $bin | Out-Null
 
 # AssemblyInfo with the requested version.

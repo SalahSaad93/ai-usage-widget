@@ -21,6 +21,14 @@ namespace AiUsageWidget.Core
         readonly string runningExePath;
         readonly Version runningVersion;
 
+        // 0 idle, 1 checking: a second CheckAsync returns while one is running (start-up
+        // check plus a manual "Check for updates" would otherwise both write the same files).
+        int checking;
+
+        // SHA-256 expected of the update folder's exe, remembered at verification time so
+        // InstallPending can re-verify whatever is on disk right before the swap.
+        string pendingSha256;
+
         public Updater(UpdateSettings cfg, string runningExePath, Version runningVersion)
         {
             this.cfg = cfg;
@@ -45,23 +53,32 @@ namespace AiUsageWidget.Core
         public async Task CheckAsync()
         {
             if (!Enabled) return;
-            string token = null;
-            if (cfg.RequiresToken)
-            {
-                token = TokenStore.Load();
-                if (string.IsNullOrEmpty(token))
-                {
-                    SetStatus("updates: token needed");
-                    return;
-                }
-            }
+            if (Interlocked.CompareExchange(ref checking, 1, 0) != 0) return;   // already running
             try
             {
-                await CheckCoreAsync(token);
+                string token = null;
+                if (cfg.RequiresToken)
+                {
+                    token = TokenStore.Load();
+                    if (string.IsNullOrEmpty(token))
+                    {
+                        SetStatus("updates: token needed");
+                        return;
+                    }
+                }
+                try
+                {
+                    await CheckCoreAsync(token);
+                }
+                catch (Exception ex)
+                {
+                    Log.Error("update check failed", ex);
+                    SetStatus("update check failed");
+                }
             }
-            catch (Exception)
+            finally
             {
-                SetStatus("update check failed");
+                Interlocked.Exchange(ref checking, 0);
             }
         }
 
@@ -126,6 +143,7 @@ namespace AiUsageWidget.Core
                 SetStatus("update failed");
                 return;
             }
+            pendingSha256 = sha256;   // remembered for the re-verify in InstallPending
 
             if (cfg.Mode == "notify")
             {
@@ -184,34 +202,65 @@ namespace AiUsageWidget.Core
         {
             string newExePath = Path.Combine(AppPaths.UpdateDir, AssetName);
             int pid = Process.GetCurrentProcess().Id;
+            InstallPendingFile(newExePath, delegate(string path)
+            {
+                var start = new ProcessStartInfo();
+                start.FileName = path;
+                start.Arguments = "--updated " + pid.ToString(CultureInfo.InvariantCulture);
+                start.UseShellExecute = false;
+                Process.Start(start);
+            });
+        }
+
+        // Marks a download as verified and waiting for install (what CheckCoreAsync does
+        // after its hash check); internal so the self-test can drive InstallPendingFile
+        // without the network.
+        internal void MarkPending(string version, string sha256Hex)
+        {
+            pendingSha256 = sha256Hex;
+            PendingVersion = version;
+            PendingInstall = true;
+        }
+
+        // The install path shared by auto and notify modes. The verified exe may sit in the
+        // update folder a long time before the user clicks install, so the file is re-read
+        // and re-verified against the remembered hash; on mismatch it is deleted, the
+        // pending state cleared and "update failed" reported. Nothing unverified is executed.
+        internal bool InstallPendingFile(string newExePath, Action<string> startNew)
+        {
+            byte[] onDisk = TryReadAllBytes(newExePath);
+            if (pendingSha256 == null || !VerifySha256(onDisk, pendingSha256))
+            {
+                Log.Error("pending update no longer matches the hash verified at download", null);
+                TryDelete(newExePath);
+                PendingInstall = false;
+                PendingVersion = null;
+                pendingSha256 = null;
+                SetStatus("update failed");
+                return false;
+            }
             bool swapped = false;
             try
             {
-                swapped = TrySwap(runningExePath, newExePath, delegate(string path)
-                {
-                    var start = new ProcessStartInfo();
-                    start.FileName = path;
-                    start.Arguments = "--updated " + pid.ToString(CultureInfo.InvariantCulture);
-                    start.UseShellExecute = false;
-                    Process.Start(start);
-                });
+                swapped = TrySwap(runningExePath, newExePath, startNew);
             }
-            catch (Exception)
+            catch (Exception ex)
             {
+                Log.Error("update install failed", ex);
                 swapped = false;
             }
             if (swapped)
             {
                 PendingInstall = false;
                 PendingVersion = null;
+                pendingSha256 = null;
                 SetStatus("");
                 var exit = ExitRequested;
                 if (exit != null) exit();
+                return true;
             }
-            else
-            {
-                SetStatus("update failed");
-            }
+            SetStatus("update failed");
+            return false;
         }
 
         // Rename the running exe to <name>.old.exe, move the new one into place, launch it
@@ -339,6 +388,22 @@ namespace AiUsageWidget.Core
             }
             catch (UnauthorizedAccessException)
             {
+            }
+        }
+
+        static byte[] TryReadAllBytes(string path)
+        {
+            try
+            {
+                return File.ReadAllBytes(path);
+            }
+            catch (IOException)
+            {
+                return null;
+            }
+            catch (UnauthorizedAccessException)
+            {
+                return null;
             }
         }
 

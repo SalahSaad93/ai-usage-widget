@@ -63,7 +63,8 @@ namespace AiUsageWidget.Core
         {
             Mode = "notify";   // install only after the user clicks; existing files keep their mode
             Repo = "SalahSaad93/ai-usage-widget";
-            RequiresToken = true;
+            // Private-repo updates still work when requiresToken is true.
+            RequiresToken = false;
         }
     }
 
@@ -171,7 +172,7 @@ namespace AiUsageWidget.Core
                 if (mode == "auto" || mode == "notify" || mode == "off") Update.Mode = mode;
                 string repo = Json.GetStr(updateDict, "repo");
                 if (repo != null) Update.Repo = repo;
-                Update.RequiresToken = Json.GetBool(updateDict, "requiresToken", true);
+                Update.RequiresToken = Json.GetBool(updateDict, "requiresToken", false);
             }
         }
 

@@ -20,6 +20,7 @@ namespace AiUsageWidget.Core
         readonly UpdateSettings cfg;
         readonly string runningExePath;
         readonly Version runningVersion;
+        readonly string publicKeyXml;
 
         // 0 idle, 1 checking: a second CheckAsync returns while one is running (start-up
         // check plus a manual "Check for updates" would otherwise both write the same files).
@@ -29,11 +30,12 @@ namespace AiUsageWidget.Core
         // InstallPending can re-verify whatever is on disk right before the swap.
         string pendingSha256;
 
-        public Updater(UpdateSettings cfg, string runningExePath, Version runningVersion)
+        public Updater(UpdateSettings cfg, string runningExePath, Version runningVersion, string publicKeyXml = null)
         {
             this.cfg = cfg;
             this.runningExePath = runningExePath;
             this.runningVersion = runningVersion;
+            this.publicKeyXml = publicKeyXml ?? UpdateKey.PublicKeyXml;
         }
 
         public string StatusText { get; private set; }   // "" when nothing to say
@@ -52,6 +54,11 @@ namespace AiUsageWidget.Core
 
         public async Task CheckAsync()
         {
+            if (string.IsNullOrEmpty(publicKeyXml))
+            {
+                SetStatus("updates disabled (unsigned build)");
+                return;
+            }
             if (!Enabled) return;
             if (Interlocked.CompareExchange(ref checking, 1, 0) != 0) return;   // already running
             try
@@ -106,26 +113,37 @@ namespace AiUsageWidget.Core
             List<object> assets = Json.GetArray(release, "assets");
             var exeAsset = FindAsset(assets, AssetName);
             var metaAsset = FindAsset(assets, "latest.json");
-            if (exeAsset == null || metaAsset == null)
+            var signatureAsset = FindAsset(assets, "latest.json.sig");
+            if (exeAsset == null || metaAsset == null || signatureAsset == null)
             {
-                SetStatus("update check failed");
+                FailBadSignature(Path.Combine(AppPaths.UpdateDir, "latest.json"),
+                    Path.Combine(AppPaths.UpdateDir, "latest.json.sig"), Path.Combine(AppPaths.UpdateDir, AssetName));
                 return;
             }
 
             if (!Directory.Exists(AppPaths.UpdateDir)) Directory.CreateDirectory(AppPaths.UpdateDir);
             string newExePath = Path.Combine(AppPaths.UpdateDir, AssetName);
             string metaPath = Path.Combine(AppPaths.UpdateDir, "latest.json");
+            string signaturePath = Path.Combine(AppPaths.UpdateDir, "latest.json.sig");
 
             var downloadHeaders = new List<KeyValuePair<string, string>>();
             downloadHeaders.Add(new KeyValuePair<string, string>("Accept", "application/octet-stream"));
             byte[] metaBytes = await DownloadAssetAsync(metaAsset, downloadHeaders, token);
+            byte[] signatureBytes = await DownloadAssetAsync(signatureAsset, downloadHeaders, token);
             byte[] exeBytes = await DownloadAssetAsync(exeAsset, downloadHeaders, token);
-            if (metaBytes == null || exeBytes == null)
+            if (metaBytes == null || signatureBytes == null || exeBytes == null)
             {
-                SetStatus("update failed");
+                FailBadSignature(metaPath, signaturePath, newExePath);
+                return;
+            }
+            string signatureBase64 = Encoding.ASCII.GetString(signatureBytes).Trim();
+            if (!VerifySignature(metaBytes, signatureBase64, publicKeyXml))
+            {
+                FailBadSignature(metaPath, signaturePath, newExePath);
                 return;
             }
             File.WriteAllBytes(metaPath, metaBytes);
+            File.WriteAllBytes(signaturePath, signatureBytes);
             File.WriteAllBytes(newExePath, exeBytes);
 
             var meta = Json.ParseObject(Encoding.UTF8.GetString(metaBytes));
@@ -155,6 +173,15 @@ namespace AiUsageWidget.Core
                 return;
             }
             InstallPending();
+        }
+
+        void FailBadSignature(string metaPath, string signaturePath, string exePath)
+        {
+            TryDelete(metaPath);
+            TryDelete(signaturePath);
+            TryDelete(exePath);
+            Log.Error("update failed: bad signature", null);
+            SetStatus("update failed: bad signature");
         }
 
         // Private assets come from the asset's API url (octet-stream); public ones from
@@ -375,6 +402,31 @@ namespace AiUsageWidget.Core
                 actual = sb.ToString();
             }
             return string.Equals(actual, expectedHex.Trim(), StringComparison.OrdinalIgnoreCase);
+        }
+
+        public static bool VerifySignature(byte[] manifestBytes, string signatureBase64, string publicKeyXml)
+        {
+            if (manifestBytes == null || manifestBytes.Length == 0 || string.IsNullOrEmpty(signatureBase64)
+                || string.IsNullOrEmpty(publicKeyXml)) return false;
+            try
+            {
+                if (signatureBase64.Trim() != signatureBase64) return false;
+                for (int i = 0; i < signatureBase64.Length; i++)
+                    if (!((signatureBase64[i] >= 'A' && signatureBase64[i] <= 'Z')
+                        || (signatureBase64[i] >= 'a' && signatureBase64[i] <= 'z')
+                        || (signatureBase64[i] >= '0' && signatureBase64[i] <= '9')
+                        || signatureBase64[i] == '+' || signatureBase64[i] == '/' || signatureBase64[i] == '=')) return false;
+                byte[] signature = Convert.FromBase64String(signatureBase64);
+                using (var rsa = new RSACryptoServiceProvider())
+                {
+                    rsa.FromXmlString(publicKeyXml);
+                    return rsa.VerifyData(manifestBytes, CryptoConfig.MapNameToOID("SHA256"), signature);
+                }
+            }
+            catch (Exception)
+            {
+                return false;
+            }
         }
 
         static void Rollback(string oldPath, string runningExePath)

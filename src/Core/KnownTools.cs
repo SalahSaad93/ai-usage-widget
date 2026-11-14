@@ -86,9 +86,13 @@ namespace AiUsageWidget.Core
         }
 
         // Extra tray help line for a tool whose desktop app exists but whose provider is not
-        // usable yet (spec section 14). Null means the tool gets no help line.
+        // usable yet (spec section 14). Null means the tool gets no help line. Cursor and
+        // GitHub Copilot keep their suggestions (they say the tool was found); the line
+        // points at the Subscriptions switch their experimental providers live behind.
         public static string HelpText(string toolId)
         {
+            if (toolId == "cursor" || toolId == "github-copilot")
+                return "Experimental: enable under Subscriptions";
             if (toolId == "antigravity") return "Install the agy CLI and sign in to see usage";
             return null;
         }

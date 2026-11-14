@@ -95,6 +95,13 @@ namespace AiUsageWidget
             Check(lines, "theme_contrast", ThemeContrast);
             Check(lines, "colour_thresholds_instance", ColourThresholdsInstance);
             Check(lines, "hit_test_layouts", HitTestLayouts);
+            Check(lines, "tray_icon_worst_window", TrayIconWorstWindow);
+            Check(lines, "tray_tooltip_text", TrayTooltipText);
+            Check(lines, "tray_icon_render", TrayIconRender);
+            Check(lines, "pace_tick_geometry", PaceTickGeometry);
+            Check(lines, "build_rows_pace_and_forecast", BuildRowsPaceAndForecast);
+            Check(lines, "notifier_balloon_text", NotifierBalloonText);
+            Check(lines, "compact_no_columns_layout", CompactNoColumnsLayout);
 
             string[] all = lines.ToArray();
             if (!string.IsNullOrEmpty(outPath)) File.WriteAllLines(outPath, all, new UTF8Encoding(false)); // no BOM: the log must start with PASS
@@ -2887,6 +2894,212 @@ namespace AiUsageWidget
         {
             return painter.HitTest(new Point((int)(r.Left + r.Width / 2), (int)(r.Top + r.Height / 2)),
                 w, h, mode, scroll, rows);
+        }
+
+        // --- v0.4.0 widget wiring checks -------------------------------------------------
+
+        static void TrayIconWorstWindow()
+        {
+            That(!TrayIconRenderer.WorstPercent(null).HasValue, "no rows -> no worst percent");
+            That(TrayIconRenderer.WorstWindows(new List<RowVm>()).Count == 0, "empty rows -> no entries");
+
+            var rows = new List<RowVm>();
+            RowVm codex = new RowVm { Name = "Codex", Status = ProviderStatus.Ok };
+            codex.Windows.Add(new WindowVm { Kind = WindowKind.Weekly, Primary = true, UsedPercent = 92 });
+            codex.Windows.Add(new WindowVm { Kind = WindowKind.FiveHour, Primary = false, UsedPercent = 99 });
+            RowVm claude = new RowVm { Name = "Claude", Status = ProviderStatus.Stale };
+            claude.Windows.Add(new WindowVm { Primary = true, UsedPercent = 41.4 });
+            RowVm broken = new RowVm { Name = "Z.ai", Status = ProviderStatus.Error };
+            broken.Windows.Add(new WindowVm { Kind = WindowKind.Weekly, Primary = true, UsedPercent = 99.5 });
+            RowVm auth = new RowVm { Name = "Muse", Status = ProviderStatus.AuthRequired };
+            auth.Windows.Add(new WindowVm { Kind = WindowKind.Daily, Primary = true, UsedPercent = 98 });
+            rows.Add(codex);
+            rows.Add(claude);
+            rows.Add(broken);
+            rows.Add(auth);
+
+            List<TrayIconRenderer.TrayWindow> worst = TrayIconRenderer.WorstWindows(rows);
+            That(worst.Count == 2, "only primary windows of Ok/Stale rows, got " + worst.Count);
+            That(worst[0].Text == "Codex week 92%", "worst first, got '" + worst[0].Text + "'");
+            That(worst[1].Text == "Claude 5 hours 41%",
+                "kind label fallback and rounding, got '" + worst[1].Text + "'");
+            double? worstPercent = TrayIconRenderer.WorstPercent(rows);
+            That(worstPercent.HasValue && Math.Abs(worstPercent.Value - 92) < 1e-9,
+                "the worst percent is the top entry's");
+        }
+
+        static void TrayTooltipText()
+        {
+            var rows = new List<RowVm>();
+            RowVm codex = new RowVm { Name = "Codex", Status = ProviderStatus.Ok };
+            codex.Windows.Add(new WindowVm { Kind = WindowKind.Weekly, Primary = true, UsedPercent = 92 });
+            RowVm claude = new RowVm { Name = "Claude Code", Status = ProviderStatus.Ok };
+            claude.Windows.Add(new WindowVm { Primary = true, UsedPercent = 41 });
+            rows.Add(codex);
+            rows.Add(claude);
+            string text = TrayIconRenderer.TooltipText(rows, "fallback");
+            That(text == "Codex week 92% · Claude Code 5 hours 41%",
+                "worst windows first, joined, got '" + text + "'");
+
+            // An entry that cannot fit is dropped whole, never cut mid-entry.
+            RowVm longRow = new RowVm { Name = new string('x', 80), Status = ProviderStatus.Ok };
+            longRow.Windows.Add(new WindowVm { Kind = WindowKind.Weekly, Primary = true, UsedPercent = 99 });
+            var mixed = new List<RowVm>();
+            mixed.Add(longRow);
+            mixed.Add(claude);
+            text = TrayIconRenderer.TooltipText(mixed, "fallback");
+            That(text.Length <= 63, "the tooltip never exceeds 63 characters, got " + text.Length);
+            That(text == "Claude Code 5 hours 41%", "a too-long entry is dropped whole, got '" + text + "'");
+
+            That(TrayIconRenderer.TooltipText(new List<RowVm>(), "fallback") == "fallback",
+                "no data -> fallback");
+            That(TrayIconRenderer.TooltipText(null, "AI Usage Widget v0.4.0") == "AI Usage Widget v0.4.0",
+                "null rows -> fallback");
+            That(TrayIconRenderer.TooltipText(null, new string('f', 100)).Length == 63,
+                "a long fallback is clamped to 63");
+        }
+
+        static void TrayIconRender()
+        {
+            That(TrayIconRenderer.Render(null, Color.Red, 16) == null, "no data -> no icon");
+            using (Icon icon = TrayIconRenderer.Render(50, Color.Red, 16))
+            {
+                That(icon != null, "data -> an icon");
+                That(icon.Width == 16 && icon.Height == 16,
+                    "the icon is the requested size, got " + icon.Width + "x" + icon.Height);
+            }
+
+            // Clamped percents, and churn: the icon is rebuilt on every refresh, so the
+            // handle hand-off must survive many rounds.
+            for (int i = 0; i < 20; i++)
+                using (Icon churn = TrayIconRenderer.Render(-5 + i * 10,
+                    Color.FromArgb(0x3F, 0xB9, 0x50), 16))
+                    That(churn != null, "render round " + i + " produced an icon");
+        }
+
+        static void PaceTickGeometry()
+        {
+            using (Painter painter = new Painter(1f))
+            {
+                var bar = new RectangleF(10, 10, 100, 8);
+                That(!painter.PaceTickRect(bar, null).HasValue, "an unknown pace draws no tick");
+                RectangleF? tick = painter.PaceTickRect(bar, 50);
+                That(tick.HasValue, "a known pace draws a tick");
+                That(Math.Abs(tick.Value.X - 60) < 0.01 && Math.Abs(tick.Value.Width - 1) < 0.01,
+                    "the tick sits at the pace position, 1 px wide");
+                That(Math.Abs(tick.Value.Y - 8) < 0.01 && Math.Abs(tick.Value.Height - 12) < 0.01,
+                    "the tick is slightly taller than the bar");
+                tick = painter.PaceTickRect(bar, -10);
+                That(Math.Abs(tick.Value.X - 10) < 0.01, "a negative pace clamps to the left end");
+                tick = painter.PaceTickRect(bar, 150);
+                That(Math.Abs(tick.Value.X - 110) < 0.01, "a pace over 100 clamps to the right end");
+            }
+        }
+
+        static void BuildRowsPaceAndForecast()
+        {
+            DateTime t0 = new DateTime(2026, 5, 1, 0, 0, 0, DateTimeKind.Utc);   // window start
+            DateTime now = t0.AddHours(1);
+            UsageSnapshot ok = SnapFor("codex", "Codex");
+            ok.Windows.Add(TestWindow(WindowKind.FiveHour, "5h", 40, 18000, t0.AddHours(5)));
+            var snapshots = new List<UsageSnapshot>();
+            snapshots.Add(ok);
+            var ids = new List<string>();
+            ids.Add("codex");
+
+            // Without history: the pace is filled, the forecast stays empty.
+            List<RowVm> rows = Painter.BuildRows(snapshots, now, ids);
+            That(rows[0].Windows[0].PacePercent.HasValue
+                && Math.Abs(rows[0].Windows[0].PacePercent.Value - 20) < 1e-9,
+                "the even pace at 1 h of 5 h is 20, got " + rows[0].Windows[0].PacePercent);
+            That(rows[0].Windows[0].ForecastText == null && !rows[0].Windows[0].ForecastBeforeReset,
+                "no history -> no forecast");
+
+            // With history: the projection fills the forecast text and the before-reset flag.
+            History history = new History(Path.Combine(AppPaths.DataDir, "history-rows.json"),
+                delegate() { return now; });
+            history.Record(snapshots, t0);
+            ok.Windows[0].UsedPercent = 55;
+            history.Record(snapshots, now.AddMinutes(-30));
+            rows = Painter.BuildRows(snapshots, now, ids, history);
+            That(rows[0].Windows[0].ForecastText == "limit in 2h 15m",
+                "the forecast text, got '" + rows[0].Windows[0].ForecastText + "'");
+            That(rows[0].Windows[0].ForecastBeforeReset, "the projected hit lands before the reset");
+        }
+
+        static void NotifierBalloonText()
+        {
+            That(WidgetForm.NotifierBalloonText(new List<string>()) == "", "no messages -> empty");
+            That(WidgetForm.NotifierBalloonText(null) == "", "null -> empty");
+
+            var one = new List<string>();
+            one.Add("Codex week: 95% used");
+            That(WidgetForm.NotifierBalloonText(one) == "Codex week: 95% used", "one message");
+
+            var four = new List<string>();
+            four.Add("a");
+            four.Add("b");
+            four.Add("c");
+            four.Add("d");
+            That(WidgetForm.NotifierBalloonText(four) == "a\nb\nc\nd", "four messages join with line breaks");
+
+            var six = new List<string>();
+            six.Add("1");
+            six.Add("2");
+            six.Add("3");
+            six.Add("4");
+            six.Add("5");
+            six.Add("6");
+            That(WidgetForm.NotifierBalloonText(six) == "1\n2\n3\n4\n+2 more",
+                "six messages -> four lines and '+2 more', got '"
+                + WidgetForm.NotifierBalloonText(six).Replace("\n", "|") + "'");
+        }
+
+        static void CompactNoColumnsLayout()
+        {
+            using (Painter painter = new Painter(1f))
+            {
+                var rows = new List<RowVm>();
+                rows.Add(new RowVm { Name = "Muse", Status = ProviderStatus.AuthRequired,
+                    Msg = "sign in needed: run muse login" });
+                RowVm secondary = new RowVm { Name = "Claude Code" };
+                secondary.Windows.Add(new WindowVm { Kind = WindowKind.Weekly, Primary = false,
+                    UsedPercent = 30 });
+                rows.Add(secondary);
+
+                That(Painter.CompactColumns(rows).Count == 0, "no primary window -> no usage columns");
+
+                float width = painter.CompactWidthFor(rows);
+                That(width >= painter.S(420), "the 420 minimum holds, got " + width);
+
+                RectangleF title = painter.CompactNoColumnTitle(width, 0);
+                RectangleF message = painter.CompactNoColumnMessage(width, 0);
+                That(Math.Abs(title.Left - painter.S(10)) < 0.01
+                    && Math.Abs(title.Right - width * 0.45f) < 0.01, "the title keeps the left 45 %");
+                That(Math.Abs(message.Left - width * 0.45f) < 0.01
+                    && message.Right <= width - painter.S(10) + 0.01f, "the message takes the right 55 %");
+                That(message.Width > 0 && title.Right <= message.Left + 0.01f,
+                    "the split boxes are positive and do not overlap");
+
+                // A long message grows the width so its 55 % share fits it.
+                var longRows = new List<RowVm>();
+                longRows.Add(new RowVm { Name = "Z", Msg = new string('m', 120) });
+                float longWidth = painter.CompactWidthFor(longRows);
+                That(longWidth > painter.S(420), "a long message grows the width past the minimum");
+                RectangleF longBox = painter.CompactNoColumnMessage(longWidth, 0);
+                That(longBox.Width >= 120, "the message share fits the message, got " + longBox.Width);
+
+                // Hit-testing agrees with the drawing: the title half hits, the message half does not.
+                float height = painter.HeaderHeight + painter.ContentHeight(1, rows) + painter.FooterHeight;
+                float firstRow = painter.HeaderHeight + painter.CompactLabelBand();
+                HitInfo hit = painter.HitTest(new Point((int)painter.S(15), (int)(firstRow + painter.S(12))),
+                    width, height, 1, 0, rows);
+                That(hit.Kind == HitKind.RowTitle && hit.Row == 0,
+                    "the title half is a title hit, got " + hit.Kind);
+                hit = painter.HitTest(new Point((int)(width * 0.7f), (int)(firstRow + painter.S(12))),
+                    width, height, 1, 0, rows);
+                That(hit.Kind == HitKind.None, "the message half is no hit, got " + hit.Kind);
+            }
         }
 
     }

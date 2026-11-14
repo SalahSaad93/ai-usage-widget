@@ -19,8 +19,14 @@ namespace AiUsageWidget
         readonly Settings settings;
         readonly RefreshService refresh;
         readonly Updater updater;
+        readonly History history;                  // usage samples for pace and forecast
+        readonly Notifier notifier = new Notifier();
         Painter painter;   // rebuilt on WM_DPICHANGED at the new scale
         readonly NotifyIcon tray = new NotifyIcon();
+        Icon embeddedTrayIcon;     // the app icon; restored when there is no usage data
+        Icon renderedTrayIcon;     // the live-drawn icon (owned); null means the embedded one is in use
+        int renderedTrayPercent = -1;   // rounded percent the rendered icon was built for
+        int renderedTrayColor;          // and its colour, ToArgb
         readonly Timer refreshTimer = new Timer();
         readonly Timer minuteTimer = new Timer();
         readonly Timer updateTimer = new Timer();
@@ -42,6 +48,7 @@ namespace AiUsageWidget
         bool refreshWasBusy;       // to spot the Busy true->false edge in OnRefreshChanged
         bool inDpiChange;          // WM_DPICHANGED can re-enter via its own bounds change
         bool resumeRefreshPending; // coalesce resume/network events into one refresh
+        bool settingsOpen;         // the settings dialog is up: never open a second one
         float dpiScale;            // kept so the painter can be rebuilt for theme changes
         bool lightTheme;           // the resolved "system" / dark / light palette in use
         bool pointerOver;          // pointer on the widget: hover, tooltips, full opacity
@@ -56,6 +63,8 @@ namespace AiUsageWidget
         {
             this.versionText = versionText;
             settings = Settings.Load(AppPaths.SettingsPath);
+            history = new History(AppPaths.HistoryPath, UtcNow);
+            history.Load();
             allProviders = ProviderRegistry.All;
             foreach (IUsageProvider p in allProviders) allById[p.Id] = p;
             RefreshDetection();
@@ -116,15 +125,67 @@ namespace AiUsageWidget
 
         void OnRefreshChanged()
         {
-            if (refreshWasBusy && !refresh.Busy) TrimMemory();   // once per completed refresh
+            if (refreshWasBusy && !refresh.Busy) OnRefreshCompleted();   // once per completed refresh
             refreshWasBusy = refresh.Busy;
             FitHeightToContent();
             Invalidate();
         }
 
+        // The Busy true->false edge of a refresh: samples land in history, notifications
+        // are evaluated, and the tray icon and tooltip catch up with the new data.
+        void OnRefreshCompleted()
+        {
+            RecordHistory();
+            ShowNotifications();
+            UpdateTrayVisuals();
+            TrimMemory();
+        }
+
+        void RecordHistory()
+        {
+            try
+            {
+                history.Record(refresh.Snapshots, UtcNow());
+                history.Prune(settings.HistoryDays);
+                history.Save();
+            }
+            catch (Exception ex)
+            {
+                Log.Error("history update failed", ex);   // Record/Prune/Save log I/O issues; never throw past here
+            }
+        }
+
+        void ShowNotifications()
+        {
+            try
+            {
+                List<string> messages = notifier.Evaluate(refresh.Snapshots, settings.Notifications,
+                    UtcNow());
+                if (messages.Count > 0)
+                    BalloonWarning(NotifierBalloonText(messages));
+            }
+            catch (Exception ex)
+            {
+                Log.Error("notification check failed", ex);
+            }
+        }
+
+        // Several messages become one balloon: at most 4 lines, then "+N more".
+        public static string NotifierBalloonText(List<string> messages)
+        {
+            if (messages == null || messages.Count == 0) return "";
+            int shown = Math.Min(4, messages.Count);
+            var lines = new List<string>();
+            for (int i = 0; i < shown; i++) lines.Add(messages[i]);
+            string text = string.Join("\n", lines.ToArray());
+            if (messages.Count > 4)
+                text += "\n+" + (messages.Count - 4) + " more";
+            return text;
+        }
+
         List<RowVm> BuildRowsNow()
         {
-            return Painter.BuildRows(refresh.Snapshots, DateTime.UtcNow, activeIds);
+            return Painter.BuildRows(refresh.Snapshots, DateTime.UtcNow, activeIds, history);
         }
 
         // The window is exactly as tall as its rows (as in the prototype), capped to the screen.
@@ -324,6 +385,13 @@ namespace AiUsageWidget
             tray.ShowBalloonTip(4000, "AI Usage Widget", text, ToolTipIcon.Info);
         }
 
+        // Threshold and reset notifications use the warning icon; shown from the tray, so
+        // they arrive even while the widget itself is hidden.
+        void BalloonWarning(string text)
+        {
+            tray.ShowBalloonTip(4000, "AI Usage Widget", text, ToolTipIcon.Warning);
+        }
+
         void RestoreSavedBounds()
         {
             Rectangle r = settings.Bounds;
@@ -491,6 +559,9 @@ namespace AiUsageWidget
 
         async void RunRefresh(bool manual)
         {
+            // First-run consent comes first: no provider is contacted before it is given.
+            // This is the one choke point every refresh path goes through.
+            if (!settings.ConsentDone) return;
             try
             {
                 RecomputeShown();   // detection runs at the start of every refresh
@@ -532,7 +603,10 @@ namespace AiUsageWidget
         void InitTray()
         {
             using (System.IO.Stream icon = typeof(WidgetForm).Assembly.GetManifestResourceStream("AiUsageWidget.app.ico"))
-                tray.Icon = icon == null ? SystemIcons.Application : new Icon(icon, SystemInformation.SmallIconSize);
+                embeddedTrayIcon = icon == null
+                    ? SystemIcons.Application
+                    : new Icon(icon, SystemInformation.SmallIconSize);
+            tray.Icon = embeddedTrayIcon;
             tray.Text = TrayText();
             tray.Visible = true;
             tray.Click += delegate
@@ -542,6 +616,45 @@ namespace AiUsageWidget
                 else ShowAndActivate();
             };
             tray.DoubleClick += delegate { ShowAndActivate(); };
+        }
+
+        // The tray icon and tooltip catch up with the rows: the icon shows the worst
+        // primary window in its threshold colour, the tooltip lists the worst windows
+        // first. Rebuilt only when the rounded percent or colour actually changed, and
+        // the previous icon is disposed (this runs on every refresh).
+        void UpdateTrayVisuals()
+        {
+            List<RowVm> rows = BuildRowsNow();
+            string tooltip = TrayIconRenderer.TooltipText(rows, TrayText());
+            if (tooltip != tray.Text) tray.Text = tooltip;
+            double? worst = TrayIconRenderer.WorstPercent(rows);
+            if (!worst.HasValue)
+            {
+                RestoreEmbeddedTrayIcon();
+                return;
+            }
+            Color color = painter.ColorAt(worst.Value);
+            int percent = (int)Math.Round(worst.Value);
+            if (renderedTrayIcon != null && percent == renderedTrayPercent
+                && color.ToArgb() == renderedTrayColor) return;
+            Icon fresh = TrayIconRenderer.Render(worst, color, SystemInformation.SmallIconSize.Width);
+            if (fresh == null) return;
+            Icon old = renderedTrayIcon;
+            tray.Icon = fresh;
+            renderedTrayIcon = fresh;
+            renderedTrayPercent = percent;
+            renderedTrayColor = color.ToArgb();
+            if (old != null) old.Dispose();
+        }
+
+        void RestoreEmbeddedTrayIcon()
+        {
+            if (renderedTrayIcon == null) return;
+            Icon old = renderedTrayIcon;
+            renderedTrayIcon = null;
+            renderedTrayPercent = -1;
+            tray.Icon = embeddedTrayIcon;
+            old.Dispose();
         }
 
         string TrayText()
@@ -554,7 +667,7 @@ namespace AiUsageWidget
 
         void OnUpdaterChanged()
         {
-            tray.Text = TrayText();
+            UpdateTrayVisuals();   // the version text is only the tooltip's no-data fallback
             BuildMenu();
             Invalidate();
         }
@@ -565,6 +678,7 @@ namespace AiUsageWidget
             var menu = new ContextMenuStrip();
 
             menu.Items.Add("Refresh now", null, delegate { RunRefresh(true); });
+            menu.Items.Add("Settings…", null, delegate { OpenSettings(); });
             menu.Items.Add(new ToolStripSeparator());
 
             var layoutItem = new ToolStripMenuItem("Layout");
@@ -655,7 +769,8 @@ namespace AiUsageWidget
             if (updater.PendingInstall)
                 menu.Items.Add("Install update v" + updater.PendingVersion, null,
                     delegate { updater.InstallPending(); });
-            menu.Items.Add("Set update token…", null, delegate { ShowTokenDialog(); });
+            if (settings.Update.RequiresToken)
+                menu.Items.Add("Set update token…", null, delegate { ShowTokenDialog(); });
 
             menu.Items.Add(new ToolStripSeparator());
             ToolStripItem versionItem = menu.Items.Add("AI Usage Widget v" + versionText);
@@ -749,6 +864,46 @@ namespace AiUsageWidget
                 else TokenStore.Save(token);
                 RunCheck();
             }
+        }
+
+        // The settings window: at most one instance, modally over the widget. The dialog
+        // writes its values into `settings` on OK; ApplyLiveSettings mirrors them onto the
+        // running widget without a restart.
+        void OpenSettings()
+        {
+            if (settingsOpen) return;
+            settingsOpen = true;
+            try
+            {
+                using (SettingsForm dlg = new SettingsForm(settings, allProviders))
+                {
+                    dlg.CurrentVersion = versionText;
+                    if (dlg.ShowDialog(this) != DialogResult.OK) return;
+                }
+                ApplyLiveSettings();
+            }
+            finally
+            {
+                settingsOpen = false;
+            }
+        }
+
+        void ApplyLiveSettings()
+        {
+            // SaveSettings copies bounds, topmost and layout from the live window, so the
+            // window fields move before the save.
+            TopMost = settings.AlwaysOnTop;
+            SaveSettings();
+            bool compact = settings.Layout == "compact";
+            if ((mode == 1) != compact) SetLayout(settings.Layout);
+            refreshTimer.Interval = settings.RefreshMinutes * 60000;
+            lightTheme = ResolveLightTheme();   // theme and thresholds both live in the painter
+            ReplacePainter();
+            UpdateOpacity();
+            RecomputeShown();
+            BuildMenu();
+            Invalidate();
+            RunRefresh(false);
         }
 
         void SaveSettings()
@@ -880,6 +1035,11 @@ namespace AiUsageWidget
             if (wnd.ResetsAtUtc.HasValue)
                 lines.Add("resets " + wnd.ResetsAtUtc.Value.ToLocalTime().ToString(
                     "ddd dd MMM HH:mm", CultureInfo.CurrentCulture));
+            if (wnd.PacePercent.HasValue)
+                lines.Add("even pace would be "
+                    + Math.Round(wnd.PacePercent.Value).ToString("0", CultureInfo.InvariantCulture) + " %");
+            if (!string.IsNullOrEmpty(wnd.ForecastText))
+                lines.Add(wnd.ForecastText);
             return string.Join("\n", lines.ToArray());
         }
 
@@ -958,7 +1118,36 @@ namespace AiUsageWidget
         protected override void OnShown(EventArgs e)
         {
             base.OnShown(e);
+            if (!EnsureConsent())
+            {
+                ExitApp();   // Exit on the consent window: quit without fetching anything
+                return;
+            }
             InitialWork();
+        }
+
+        // The first-run consent window. An existing user (a settings file but no consent
+        // flag) just gets the flag; a brand-new user chooses the shown providers before
+        // the first refresh, which RunRefresh's gate holds back meanwhile.
+        bool EnsureConsent()
+        {
+            if (settings.ConsentDone) return true;
+            if (settings.HasFile)
+            {
+                settings.ConsentDone = true;
+                SaveSettings();
+                return true;
+            }
+            using (ConsentForm dlg = new ConsentForm(allProviders, IsProviderDetected))
+            {
+                if (dlg.ShowDialog(this) != DialogResult.OK) return false;
+                settings.Providers = dlg.Result;
+                settings.ConsentDone = true;
+                SaveSettings();
+                RecomputeShown();
+                BuildMenu();
+                return true;
+            }
         }
 
         async void InitialWork()
@@ -1005,6 +1194,7 @@ namespace AiUsageWidget
             updateTimer.Dispose();
             noteTimer.Dispose();
             resumeTimer.Dispose();
+            if (renderedTrayIcon != null) renderedTrayIcon.Dispose();
             tray.Dispose();
             toolTip.Dispose();
             base.OnFormClosed(e);

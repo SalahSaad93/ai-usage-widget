@@ -46,6 +46,9 @@ namespace AiUsageWidget
         public double UsedPercent;
         public string Resets;   // "2h 10m", or null when the vendor gave no reset time
         public DateTime? ResetsAtUtc;   // the absolute reset time, for the tooltip
+        public double? PacePercent;   // the even-pace percent at nowUtc, when the shape is known
+        public string ForecastText;   // "limit in 1h 20m"; null without history, "" when nothing
+        public bool ForecastBeforeReset;   // the projected limit lands before the window resets
     }
 
     public sealed class RowVm
@@ -170,8 +173,10 @@ namespace AiUsageWidget
             return minutes + "m";
         }
 
+        // With a History the windows also carry their pace and burn forecast; null (the
+        // existing callers and self-tests) keeps today's rows.
         public static List<RowVm> BuildRows(List<UsageSnapshot> snapshots, DateTime nowUtc,
-            IList<string> orderedIds)
+            IList<string> orderedIds, History history = null)
         {
             var rows = new List<RowVm>();
             if (snapshots == null || orderedIds == null) return rows;
@@ -213,6 +218,14 @@ namespace AiUsageWidget
                         vm.ResetsAtUtc = w.ResetsAtUtc;
                         TimeSpan until = w.ResetsAtUtc.Value - nowUtc;
                         vm.Resets = until.TotalSeconds <= 0 ? "now" : Duration(until);
+                    }
+                    vm.PacePercent = Forecast.PacePercent(w, nowUtc);
+                    if (history != null)
+                    {
+                        ForecastResult fc = Forecast.Project(w,
+                            history.Samples(sn.ProviderId, w.Key), nowUtc);
+                        vm.ForecastText = fc.Text;
+                        vm.ForecastBeforeReset = fc.BeforeReset;
                     }
                     row.Windows.Add(vm);
                 }
@@ -293,6 +306,7 @@ namespace AiUsageWidget
         public float CompactWidthFor(List<RowVm> rows)
         {
             float titleNeeded = 0;
+            float messageNeeded = 0;
             using (var probe = new Bitmap(1, 1))
             using (Graphics g = Graphics.FromImage(probe))
             {
@@ -303,9 +317,20 @@ namespace AiUsageWidget
                         if (!string.IsNullOrEmpty(r.Plan))
                             w += S(6) + g.MeasureString(r.Plan, fPlan, 1000, near).Width;
                         if (w > titleNeeded) titleNeeded = w;
+                        float m = g.MeasureString(r.Msg ?? "", fSmall, 1000, near).Width;
+                        if (m > messageNeeded) messageNeeded = m;
                     }
             }
-            float needed = titleNeeded + S(20 + 82 * CompactColumns(rows).Count + 2);   // margins + one 82 px column per kind
+            int columns = CompactColumns(rows).Count;
+            if (columns == 0)
+            {
+                // No usage columns: the title gets 45 % and the message 55 % of the width,
+                // so the width grows until both shares fit their widest text.
+                float byTitle = (titleNeeded + S(20)) * 100f / 45f;
+                float byMessage = (messageNeeded + S(20)) * 100f / 55f;
+                return Math.Max(S(420), Math.Max(byTitle, byMessage));
+            }
+            float needed = titleNeeded + S(20 + 82 * columns + 2);   // margins + one 82 px column per kind
             return Math.Max(S(420), needed);
         }
 
@@ -382,6 +407,20 @@ namespace AiUsageWidget
             return new RectangleF(CompactColumnX(cols, column), y, S(82) - S(8), S(24));
         }
 
+        // With no usage columns at all (no shown row has a primary window) the compact row
+        // splits: the title keeps the left 45 % and the row's message takes the right 55 %.
+        public RectangleF CompactNoColumnTitle(float width, float y)
+        {
+            float split = width * 0.45f;
+            return new RectangleF(S(10), y, Math.Max(0f, split - S(10)), S(24));
+        }
+
+        public RectangleF CompactNoColumnMessage(float width, float y)
+        {
+            float split = width * 0.45f;
+            return new RectangleF(split, y, Math.Max(0f, width - S(10) - split), S(24));
+        }
+
         public void Draw(Graphics g, float winWidth, float winHeight, int mode, int scroll,
             List<RowVm> rows, string headerNote, string footerNote, HitInfo hover)
         {
@@ -441,10 +480,14 @@ namespace AiUsageWidget
                             new RectangleF(ln.X, ln.Y, labelWidth, ln.Height), false);
                         float bx = ln.X + labelWidth, bw = ln.Right - S(84) - S(40) - bx;
                         if (bw > S(10))
-                            Bar(g, wnd.UsedPercent, new RectangleF(bx, ln.Y + S(5.5f), bw, S(8)), dim);
+                            Bar(g, wnd.UsedPercent, new RectangleF(bx, ln.Y + S(5.5f), bw, S(8)), dim,
+                                wnd.PacePercent);
                         Txt(g, PercentText(wnd.UsedPercent), fPct, Fade(ColorAt(wnd.UsedPercent), dim),
                             new RectangleF(ln.Right - S(84) - S(40), ln.Y, S(40), ln.Height), true);
-                        if (wnd.Resets != null)
+                        if (wnd.ForecastBeforeReset && !string.IsNullOrEmpty(wnd.ForecastText))
+                            Txt(g, wnd.ForecastText, fSmall, Fade(theme.Yellow, dim),
+                                new RectangleF(ln.Right - S(84), ln.Y, S(84), ln.Height), true);
+                        else if (wnd.Resets != null)
                             Txt(g, "resets " + wnd.Resets, fSmall, Fade(theme.DimText, dim),
                                 new RectangleF(ln.Right - S(84), ln.Y, S(84), ln.Height), true);
                         else if (wnd.Detail != null)
@@ -466,13 +509,14 @@ namespace AiUsageWidget
         {
             List<WindowKind> kinds = CompactColumns(rows);
             float cols = CompactColsLeft(width, rows);
+            bool noColumns = kinds.Count == 0;
             for (int i = 0; i < kinds.Count; i++)
                 Txt(g, DefaultLabel(kinds[i]), fSmall, theme.DimText,
                     new RectangleF(CompactColumnX(cols, i), y, S(82), CompactLabelBand()), false);
             y += CompactLabelBand();
             foreach (RowVm r in rows)
             {
-                Title(g, r, CompactTitleBox(cols, y));
+                Title(g, r, noColumns ? CompactNoColumnTitle(width, y) : CompactTitleBox(cols, y));
                 bool dim = r.Status == ProviderStatus.Stale;
                 if (r.Windows.Count > 0)
                 {
@@ -485,7 +529,8 @@ namespace AiUsageWidget
                             Txt(g, "—", fSmall, Fade(theme.DimText, dim), cell, true);
                             continue;
                         }
-                        Bar(g, wnd.UsedPercent, new RectangleF(cell.X, y + S(9.5f), cell.Width - S(34), S(5)), dim);
+                        Bar(g, wnd.UsedPercent, new RectangleF(cell.X, y + S(9.5f), cell.Width - S(34), S(5)), dim,
+                            wnd.PacePercent);
                         Txt(g, PercentText(wnd.UsedPercent), fSmall, Fade(ColorAt(wnd.UsedPercent), dim),
                             new RectangleF(cell.Right - S(34), y, S(34), S(24)), true);
                     }
@@ -493,8 +538,10 @@ namespace AiUsageWidget
                 else
                 {
                     Color c = r.Status == ProviderStatus.AuthRequired ? theme.Yellow : theme.DimText;
-                    Txt(g, r.Msg, fSmall, c, new RectangleF(cols + S(8), y,
-                        S(82) * kinds.Count - S(8), S(24)), false);
+                    RectangleF msgBox = noColumns
+                        ? CompactNoColumnMessage(width, y)
+                        : new RectangleF(cols + S(8), y, S(82) * kinds.Count - S(8), S(24));
+                    Txt(g, r.Msg, fSmall, c, msgBox, false);
                 }
                 y += CompactRowPitch();
             }
@@ -532,11 +579,26 @@ namespace AiUsageWidget
             }
         }
 
-        void Bar(Graphics g, double v, RectangleF r, bool dim)
+        void Bar(Graphics g, double v, RectangleF r, bool dim, double? pacePercent)
         {
             FillRound(g, theme.Line, r, r.Height / 2);
             float w = Math.Max(r.Height, r.Width * (float)(Math.Min(100, Math.Max(0, v)) / 100));
             FillRound(g, Fade(ColorAt(v), dim), new RectangleF(r.X, r.Y, w, r.Height), r.Height / 2);
+            RectangleF? tick = PaceTickRect(r, pacePercent);
+            if (tick.HasValue)
+                using (var b = new SolidBrush(Color.FromArgb(178, theme.Text)))
+                    g.FillRectangle(b, tick.Value);
+        }
+
+        // The vertical pace tick in a usage bar: 1 px scaled, slightly taller than the bar,
+        // at the even-pace position. Usage left of it means under pace. Null when the pace
+        // is unknown.
+        public RectangleF? PaceTickRect(RectangleF bar, double? pacePercent)
+        {
+            if (!pacePercent.HasValue) return null;
+            double pace = Math.Min(100.0, Math.Max(0.0, pacePercent.Value));
+            float x = bar.X + (float)(bar.Width * pace / 100.0);
+            return new RectangleF(x, bar.Y - S(2), Math.Max(1f, S(1)), bar.Height + S(4));
         }
 
         public static string DefaultLabel(WindowKind kind)
@@ -654,7 +716,10 @@ namespace AiUsageWidget
             for (int i = 0; i < rows.Count; i++)
             {
                 RowVm r = rows[i];
-                if (CompactTitleBox(cols, y).Contains(p))
+                RectangleF titleBox = kinds.Count == 0
+                    ? CompactNoColumnTitle(width, y)
+                    : CompactTitleBox(cols, y);
+                if (titleBox.Contains(p))
                     return new HitInfo { Kind = HitKind.RowTitle, Row = i, Window = -1 };
                 for (int j = 0; j < kinds.Count; j++)
                 {

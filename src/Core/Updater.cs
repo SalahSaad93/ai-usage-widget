@@ -89,8 +89,87 @@ namespace AiUsageWidget.Core
             }
         }
 
+        // Public repository (no token): the release files are fetched from GitHub's plain
+        // download links. The API allows only 60 anonymous requests per hour per IP address,
+        // which a shared address exhausts; the download links have no such limit. The
+        // version comes from the signed manifest itself, so nothing unsigned is trusted.
+        async Task CheckDirectAsync()
+        {
+            string releases = "https://github.com/" + cfg.Repo + "/releases/";
+            HttpResponse metaResp = await Http.GetBytesAsync(
+                releases + "latest/download/latest.json", null, CancellationToken.None);
+            if (metaResp.Status != 200 || metaResp.Bytes == null || metaResp.Bytes.Length == 0)
+            {
+                SetStatus("update check failed");
+                return;
+            }
+            byte[] metaBytes = metaResp.Bytes;
+            var meta = Json.ParseObject(Encoding.UTF8.GetString(metaBytes));
+            string version = NormalizeTag(Json.GetStr(meta, "version"));
+            if (!IsNewerVersion(version, runningVersion))
+            {
+                SetStatus("up to date");
+                return;
+            }
+
+            if (!Directory.Exists(AppPaths.UpdateDir)) Directory.CreateDirectory(AppPaths.UpdateDir);
+            string newExePath = Path.Combine(AppPaths.UpdateDir, AssetName);
+            string metaPath = Path.Combine(AppPaths.UpdateDir, "latest.json");
+            string signaturePath = Path.Combine(AppPaths.UpdateDir, "latest.json.sig");
+
+            HttpResponse sigResp = await Http.GetBytesAsync(
+                releases + "latest/download/latest.json.sig", null, CancellationToken.None);
+            string signatureBase64 = sigResp.Status == 200 && sigResp.Bytes != null
+                ? Encoding.ASCII.GetString(sigResp.Bytes).Trim() : null;
+            if (!VerifySignature(metaBytes, signatureBase64, publicKeyXml))
+            {
+                FailBadSignature(metaPath, signaturePath, newExePath);
+                return;
+            }
+
+            // The manifest is signed, so its version and asset name are trusted from here.
+            string sha256 = Json.GetStr(meta, "sha256");
+            string exeUrl = releases + "download/v" + version + "/" + AssetName;
+            HttpResponse exeResp = null;
+            if (Json.GetStr(meta, "asset") == AssetName && IsAllowedUrl(exeUrl))
+                exeResp = await Http.GetBytesAsync(exeUrl, null, CancellationToken.None);
+            if (exeResp == null || exeResp.Status != 200 || !VerifySha256(exeResp.Bytes, sha256))
+            {
+                TryDelete(newExePath);
+                TryDelete(metaPath);
+                Log.Error("update failed: download does not match the signed manifest", null);
+                SetStatus("update failed");
+                return;
+            }
+            File.WriteAllBytes(metaPath, metaBytes);
+            File.WriteAllBytes(signaturePath, sigResp.Bytes);
+            File.WriteAllBytes(newExePath, exeResp.Bytes);
+            OfferOrInstall(version, sha256);
+        }
+
+        // A verified download is ready: install it (auto) or tell the user (notify).
+        void OfferOrInstall(string version, string sha256)
+        {
+            pendingSha256 = sha256;   // remembered for the re-verify in InstallPending
+            if (cfg.Mode == "notify")
+            {
+                PendingVersion = version;
+                PendingInstall = true;
+                SetStatus("update available: v" + version);
+                var notify = NotifyUser;
+                if (notify != null) notify("AI Usage Widget v" + version + " is available");
+                return;
+            }
+            InstallPending();
+        }
+
         async Task CheckCoreAsync(string token)
         {
+            if (string.IsNullOrEmpty(token))
+            {
+                await CheckDirectAsync();
+                return;
+            }
             string apiUrl = "https://api.github.com/repos/" + cfg.Repo + "/releases/latest";
             var headers = new List<KeyValuePair<string, string>>();
             headers.Add(new KeyValuePair<string, string>("Accept", "application/vnd.github+json"));
@@ -161,18 +240,7 @@ namespace AiUsageWidget.Core
                 SetStatus("update failed");
                 return;
             }
-            pendingSha256 = sha256;   // remembered for the re-verify in InstallPending
-
-            if (cfg.Mode == "notify")
-            {
-                PendingVersion = tag;
-                PendingInstall = true;
-                SetStatus("update available: v" + tag);
-                var notify = NotifyUser;
-                if (notify != null) notify("AI Usage Widget v" + tag + " is available");
-                return;
-            }
-            InstallPending();
+            OfferOrInstall(tag, sha256);
         }
 
         void FailBadSignature(string metaPath, string signaturePath, string exePath)
@@ -513,6 +581,7 @@ namespace AiUsageWidget.Core
         void SetStatus(string text)
         {
             StatusText = text ?? "";
+            if (StatusText.Length > 0) Log.Info("update: " + StatusText);   // the tray text alone is easy to miss
             var changed = StateChanged;
             if (changed != null) changed();
         }

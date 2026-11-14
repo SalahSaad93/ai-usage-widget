@@ -17,6 +17,10 @@ All notable changes to this project are documented in this file. The format is b
 - Starting the widget a second time now really shows the running one. The request was sent as a
   broadcast window message, which never reaches the widget's window; it is a named event now.
 - The first-run window no longer clips long descriptions.
+- Update checks no longer fail on shared internet addresses. They used GitHub's API, which allows
+  60 anonymous requests per hour per address; public-repo updates now use the plain release
+  download links, and the version is read from the signed manifest.
+- Every updater status is written to `log.txt`, so a failed check is no longer silent.
 
 ### Changed
 

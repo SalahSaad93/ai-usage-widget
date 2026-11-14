@@ -571,11 +571,17 @@ Source: GitHub Releases of `update.repo`. Disabled when `repo` is empty or `mode
 on an unsigned build (an empty `UpdateKey.PublicKeyXml` — checks report "updates disabled
 (unsigned build)"). Checks run at startup (after the first paint), every 24 h, and from the menu.
 
-- **Check**: `GET https://api.github.com/repos/<repo>/releases/latest`
-  (`Accept: application/vnd.github+json`, `Authorization: Bearer <token>` only when
-  `requiresToken` is set and a token is stored — without it: "updates: token needed"). The
-  leading `v` of `tag_name` is stripped and compared with the running assembly version as a
-  `System.Version`; only strictly newer proceeds.
+- **Check, public repo** (`requiresToken` false, the default): no API call. The widget fetches
+  `https://github.com/<repo>/releases/latest/download/latest.json` and `latest.json.sig`,
+  verifies the signature, reads the version from the signed manifest and, when it is strictly
+  newer, fetches `releases/download/v<version>/AiUsageWidget.exe`. GitHub's API allows only 60
+  anonymous requests per hour per IP address, which a shared address exhausts; the download
+  links have no such limit.
+- **Check, private repo** (`requiresToken` true): `GET https://api.github.com/repos/<repo>/releases/latest`
+  (`Accept: application/vnd.github+json`, `Authorization: Bearer <token>`; without a stored
+  token: "updates: token needed"). The leading `v` of `tag_name` is stripped and compared with
+  the running assembly version as a `System.Version`; only strictly newer proceeds.
+- Every status the updater reports is also written to `log.txt`.
 - **Download**: the `latest.json`, `latest.json.sig` and `AiUsageWidget.exe` release assets into
   `%LOCALAPPDATA%\AiUsageWidget\update\`. Private-repo assets are fetched from the asset's API
   `url` (`Accept: application/octet-stream`). Only `https` URLs on `api.github.com`,

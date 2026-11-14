@@ -58,6 +58,10 @@ namespace AiUsageWidget
             Check(lines, "antigravity_tolerant_shapes", AntigravityTolerantShapes);
             Check(lines, "antigravity_cli_states", AntigravityCliStates);
             Check(lines, "antigravity_detection_and_suggestion", AntigravityDetectionAndSuggestion);
+            Check(lines, "log_writes_and_rotates", LogWritesAndRotates);
+            Check(lines, "settings_dedupes_id_lists", SettingsDedupesIdLists);
+            Check(lines, "serialize_indented_round_trip", SerializeIndentedRoundTrip);
+            Check(lines, "install_reverifies_hash", InstallReverifiesHash);
 
             string[] all = lines.ToArray();
             if (!string.IsNullOrEmpty(outPath)) File.WriteAllLines(outPath, all, new UTF8Encoding(false)); // no BOM: the log must start with PASS
@@ -348,7 +352,7 @@ namespace AiUsageWidget
             That(s.RefreshMinutes == 5 && s.Layout == "detailed" && s.AlwaysOnTop, "defaults");
             That(s.Bounds.Width == 340 && s.Bounds.Height == 560, "default bounds");
             That(s.Providers.Count == 0, "default providers list is empty -> registry order");
-            That(s.Update.Mode == "auto" && s.Update.Repo == "SalahSaad93/ai-usage-widget" && s.Update.RequiresToken,
+            That(s.Update.Mode == "notify" && s.Update.Repo == "SalahSaad93/ai-usage-widget" && s.Update.RequiresToken,
                 "update defaults");
 
             File.WriteAllText(path, "{\"refreshMinutes\":0,\"custom\":\"keep\"," +
@@ -356,12 +360,19 @@ namespace AiUsageWidget
             s = Settings.Load(path);
             That(s.RefreshMinutes == 1, "refreshMinutes clamped low");
             That(s.Update.Repo == "owner/repo", "repo read");
-            That(s.Update.Mode == "auto", "unknown mode falls back to auto");
+            That(s.Update.Mode == "notify", "unknown mode falls back to notify");
+
+            // An existing file that names a mode keeps it (only the default changed);
+            // a separate file keeps the unknown keys below intact for the save assertions.
+            string modePath = Path.Combine(AppPaths.DataDir, "settings-mode-kept.json");
+            File.WriteAllText(modePath, "{\"update\":{\"mode\":\"auto\"}}");
+            Settings modeKept = Settings.Load(modePath);
+            That(modeKept.Update.Mode == "auto", "existing mode kept");
 
             s.RefreshMinutes = 500;
             s.Save(path);
             string saved = File.ReadAllText(path);
-            That(saved.Contains("\"refreshMinutes\":120"), "refreshMinutes clamped high on save");
+            That(saved.Contains("\"refreshMinutes\": 120"), "refreshMinutes clamped high on save");
             That(saved.Contains("\"custom\""), "unknown keys preserved on save");
             That(saved.Contains("\"extra\""), "unknown update keys preserved on save");
 
@@ -387,12 +398,13 @@ namespace AiUsageWidget
                     "registry order at " + i + ", got " + merged[i].Id);
             That(merged[0].Id == "claude-code", "default first provider is claude-code");
 
-            // The one legacy shape: exactly [{"id":"codex","enabled":true}] -> treated as empty.
+            // A single [codex] entry is a real user choice now (the pre-0.2.2 migration
+            // hack is gone): codex first, the rest appended in registry order.
             File.WriteAllText(path, "{\"providers\":[{\"id\":\"codex\",\"enabled\":true}]}");
             s = Settings.Load(path);
             merged = s.MergeProviders(registry);
-            That(merged.Count == registry.Length && merged[0].Id == "claude-code",
-                "old default [codex] behaves as empty");
+            That(merged.Count == registry.Length, "explicit [codex] keeps every provider");
+            That(merged[0].Id == "codex", "explicit [codex] is honoured, got " + merged[0].Id);
 
             // An explicit list controls order and enablement; unnamed ids append enabled in
             // registry order.
@@ -1013,7 +1025,7 @@ namespace AiUsageWidget
             s.DismissedSuggestions.Add("antigravity");
             s.Save(path);
             string saved = File.ReadAllText(path);
-            That(saved.Contains("\"autoDetect\":true"), "autoDetect saved");
+            That(saved.Contains("\"autoDetect\": true"), "autoDetect saved");
             That(saved.Contains("antigravity"), "dismissedSuggestions saved");
             That(saved.Contains("\"custom\""), "unknown keys preserved");
             s = Settings.Load(path);
@@ -1156,6 +1168,160 @@ namespace AiUsageWidget
             That(KnownTools.HelpText("antigravity") == "Install the agy CLI and sign in to see usage",
                 "tray help line");
             That(KnownTools.HelpText("cursor") == null, "no help line for other tools");
+        }
+
+        static void LogWritesAndRotates()
+        {
+            string logPath = AppPaths.LogPath;
+            if (File.Exists(logPath)) File.Delete(logPath);
+            string oldPath = Path.Combine(Path.GetDirectoryName(logPath), "log.old.txt");
+            if (File.Exists(oldPath)) File.Delete(oldPath);
+
+            Log.Info("selftest start");
+            Log.Error("selftest failure", new Exception("kaboom"));
+            string[] lines = File.ReadAllLines(logPath);
+            That(lines.Length == 2, "two entries written, got " + lines.Length);
+            That(lines[0].EndsWith("INFO selftest start"), "info line, got " + lines[0]);
+            That(lines[1].Contains("ERROR selftest failure") && lines[1].Contains("kaboom"),
+                "error line carries the message and exception, got " + lines[1]);
+            DateTime stamp;
+            That(DateTime.TryParseExact(lines[0].Substring(0, 20), "yyyy-MM-ddTHH:mm:ss'Z'",
+                CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out stamp),
+                "ISO-8601 UTC timestamp prefix, got " + lines[0]);
+
+            // Push the file past 256 KB: the next write rotates it into log.old.txt.
+            Log.Info(new string('a', 300 * 1024));
+            Log.Info("after rotation");
+            That(File.Exists(oldPath), "oversized log renamed to log.old.txt");
+            That(File.ReadAllText(oldPath).Contains("selftest start"), "rotated entries kept");
+            lines = File.ReadAllLines(logPath);
+            That(lines.Length == 1 && lines[0].EndsWith("INFO after rotation"),
+                "fresh log.txt holds only post-rotation entries");
+
+            // A second rotation replaces the previous log.old.txt.
+            Log.Info(new string('b', 300 * 1024));
+            Log.Info("after second rotation");
+            string oldText = File.ReadAllText(oldPath);
+            That(oldText.Contains("after rotation") && oldText.Contains(new string('b', 1024)),
+                "second rotation replaces the previous log.old.txt");
+            // "after second rotation" does not contain "after rotation" as a substring, so
+            // these two lines prove log.txt holds only post-second-rotation content.
+            That(!File.ReadAllText(logPath).Contains("after rotation")
+                && File.ReadAllText(logPath).Contains("after second rotation"),
+                "rotated content left log.txt");
+        }
+
+        static void SettingsDedupesIdLists()
+        {
+            string path = Path.Combine(AppPaths.DataDir, "settings-dedupe.json");
+            File.WriteAllText(path,
+                "{\"knownProviders\":[\"codex\",\"zai\",\"codex\"]," +
+                "\"dismissedSuggestions\":[\"cursor\",\"cursor\",\"gemini-cli\"]," +
+                "\"announcedSuggestions\":[\"grok-build\",\"grok-build\"]}");
+            Settings s = Settings.Load(path);
+            That(s.KnownProviders.Count == 2 && s.KnownProviders[0] == "codex"
+                && s.KnownProviders[1] == "zai",
+                "knownProviders deduplicated in order, got " + string.Join(",", s.KnownProviders.ToArray()));
+            That(s.DismissedSuggestions.Count == 2 && s.DismissedSuggestions[0] == "cursor"
+                && s.DismissedSuggestions[1] == "gemini-cli", "dismissedSuggestions deduplicated");
+            That(s.AnnouncedSuggestions.Count == 1 && s.AnnouncedSuggestions[0] == "grok-build",
+                "announcedSuggestions deduplicated");
+        }
+
+        static void SerializeIndentedRoundTrip()
+        {
+            var inner = new Dictionary<string, object>();
+            inner["n"] = 41.5;
+            inner["on"] = true;
+            inner["empty"] = new Dictionary<string, object>();
+            inner["list"] = new List<object>();
+            var root = new Dictionary<string, object>();
+            root["tricky"] = "quote \" brace { } bracket [ ] comma , colon : backslash \\ end\\\"";
+            root["plain"] = "value";
+            root["nested"] = inner;
+
+            string indented = Json.SerializeIndented(root);
+            var back = Json.ParseObject(indented);
+            That(back != null, "indented output parses back");
+            That(Json.GetStr(back, "tricky") == (string)root["tricky"],
+                "tricky string survives, got '" + Json.GetStr(back, "tricky") + "'");
+            That(Json.GetStr(back, "plain") == "value", "plain string survives");
+            Dictionary<string, object> nestedBack = Json.GetObject(back, "nested");
+            That(nestedBack != null, "nested object survives");
+            double? n = Json.GetDouble(nestedBack, "n");
+            That(n.HasValue && n.Value == 41.5, "nested number survives");
+            That(Json.GetBool(nestedBack, "on", false), "nested bool survives");
+            List<object> list = Json.GetArray(nestedBack, "list");
+            That(list != null && list.Count == 0, "empty list survives");
+            That(Json.GetObject(nestedBack, "empty") != null, "empty object survives");
+
+            // The settings save path (indented) still round-trips unknown keys.
+            string path = Path.Combine(AppPaths.DataDir, "settings-indented.json");
+            File.WriteAllText(path, "{\"custom\":\"keep \\\"quoted\\\" {braced}\"}");
+            Settings s = Settings.Load(path);
+            s.Save(path);
+            s = Settings.Load(path);
+            That(Json.GetStr(Json.ParseObject(File.ReadAllText(path)), "custom")
+                == "keep \"quoted\" {braced}", "unknown key with tricky string survives a save");
+        }
+
+        static string Sha256Hex(byte[] data)
+        {
+            using (SHA256 sha = SHA256.Create())
+            {
+                byte[] hash = sha.ComputeHash(data);
+                var sb = new StringBuilder(hash.Length * 2);
+                foreach (byte b in hash) sb.Append(b.ToString("x2", CultureInfo.InvariantCulture));
+                return sb.ToString();
+            }
+        }
+
+        static void InstallReverifiesHash()
+        {
+            string dir = Path.Combine(AppPaths.DataDir, "install");
+            if (Directory.Exists(dir)) Directory.Delete(dir, true);
+            Directory.CreateDirectory(dir);
+            string running = Path.Combine(dir, "AiUsageWidget.exe");
+            File.WriteAllText(running, "OLD");
+            Directory.CreateDirectory(AppPaths.UpdateDir);
+            string fresh = Path.Combine(AppPaths.UpdateDir, "AiUsageWidget.exe");
+
+            var cfg = new UpdateSettings();
+            cfg.Mode = "notify";
+            Updater updater = new Updater(cfg, running, new Version("0.3.2"));
+            string sha = Sha256Hex(Encoding.UTF8.GetBytes("NEW"));
+
+            // The verified file is tampered with before the user clicks install: refuse,
+            // delete it, clear the pending state and report "update failed".
+            File.WriteAllText(fresh, "NEW");
+            updater.MarkPending("9.9.9", sha);
+            File.WriteAllText(fresh, "TAMPERED");
+            string launched = null;
+            bool ok = updater.InstallPendingFile(fresh, delegate(string p) { launched = p; });
+            That(!ok, "tampered download is not installed");
+            That(!File.Exists(fresh), "tampered download deleted");
+            That(updater.StatusText == "update failed",
+                "status is update failed, got '" + updater.StatusText + "'");
+            That(!updater.PendingInstall && updater.PendingVersion == null, "pending state cleared");
+            That(launched == null && File.ReadAllText(running) == "OLD", "running exe untouched");
+
+            // A download still matching the remembered hash installs normally.
+            File.WriteAllText(fresh, "NEW");
+            updater.MarkPending("9.9.9", sha);
+            ok = updater.InstallPendingFile(fresh, delegate(string p) { launched = p; });
+            That(ok, "matching download installs");
+            That(launched == running, "new exe launched at the running path");
+            That(File.ReadAllText(running) == "NEW", "new exe takes the running path");
+            That(updater.StatusText == "" && !updater.PendingInstall && updater.PendingVersion == null,
+                "successful install clears the pending state");
+
+            // A missing file fails safe too.
+            updater.MarkPending("9.9.9", sha);
+            launched = null;
+            ok = updater.InstallPendingFile(Path.Combine(dir, "missing.exe"),
+                delegate(string p) { launched = p; });
+            That(!ok && updater.StatusText == "update failed", "missing download -> update failed");
+            That(launched == null, "nothing launched for a missing download");
         }
 
     }

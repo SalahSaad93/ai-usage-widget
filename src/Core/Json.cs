@@ -2,6 +2,7 @@ using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Text;
 using System.Web.Script.Serialization;
 
 namespace AiUsageWidget.Core
@@ -30,6 +31,99 @@ namespace AiUsageWidget.Core
         public static string Serialize(object value)
         {
             return NewSerializer().Serialize(value);
+        }
+
+        // Minified serialize, then a pretty-printer pass. The printer tracks string state,
+        // so quotes, backslashes, braces, brackets, commas and colons inside strings never
+        // break the layout; the output is still valid JSON and parses back unchanged.
+        public static string SerializeIndented(object value)
+        {
+            return Indent(Serialize(value));
+        }
+
+        static string Indent(string json)
+        {
+            if (json == null) return null;
+            var sb = new StringBuilder(json.Length + 32);
+            int depth = 0;
+            bool inString = false;
+            for (int i = 0; i < json.Length; i++)
+            {
+                char c = json[i];
+                if (inString)
+                {
+                    sb.Append(c);
+                    if (c == '\\')
+                    {
+                        int escaped = i + 1;
+                        if (escaped < json.Length)
+                        {
+                            sb.Append(json[escaped]);   // verbatim, never interpreted
+                            i = escaped;
+                        }
+                    }
+                    else if (c == '"') inString = false;
+                    continue;
+                }
+                switch (c)
+                {
+                    case '"':
+                        inString = true;
+                        sb.Append(c);
+                        break;
+                    case '{':
+                    case '[':
+                    {
+                        sb.Append(c);
+                        char close = c == '{' ? '}' : ']';
+                        int next = NextNonSpace(json, i + 1);
+                        if (next >= 0 && json[next] == close)
+                        {
+                            sb.Append(close);   // {} and [] stay on one line
+                            i = next;
+                        }
+                        else
+                        {
+                            depth++;
+                            NewLine(sb, depth);
+                        }
+                        break;
+                    }
+                    case '}':
+                    case ']':
+                    {
+                        depth--;
+                        NewLine(sb, depth);
+                        sb.Append(c);
+                        break;
+                    }
+                    case ',':
+                        sb.Append(c);
+                        NewLine(sb, depth);
+                        break;
+                    case ':':
+                        sb.Append(c);
+                        sb.Append(' ');
+                        break;
+                    default:
+                        sb.Append(c);
+                        break;
+                }
+            }
+            return sb.ToString();
+        }
+
+        static int NextNonSpace(string s, int start)
+        {
+            for (int i = start; i < s.Length; i++)
+                if (s[i] != ' ') return i;
+            return -1;
+        }
+
+        static void NewLine(StringBuilder sb, int depth)
+        {
+            sb.Append(Environment.NewLine);
+            sb.Append(' ', depth * 2);
         }
 
         static JavaScriptSerializer NewSerializer()

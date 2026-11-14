@@ -24,6 +24,8 @@ namespace AiUsageWidget.Core
 
         public static string CachePath { get { return Path.Combine(DataDir, "cache.json"); } }
 
+        public static string LogPath { get { return Path.Combine(DataDir, "log.txt"); } }
+
         public static string UpdateDir { get { return Path.Combine(DataDir, "update"); } }
 
         public static string TokenPath { get { return Path.Combine(DataDir, "update-token.bin"); } }
@@ -59,7 +61,7 @@ namespace AiUsageWidget.Core
 
         public UpdateSettings()
         {
-            Mode = "auto";
+            Mode = "notify";   // install only after the user clicks; existing files keep their mode
             Repo = "SalahSaad93/ai-usage-widget";
             RequiresToken = true;
         }
@@ -151,9 +153,6 @@ namespace AiUsageWidget.Core
                     ps.Enabled = Json.GetBool(pd, "enabled", true);
                     list.Add(ps);
                 }
-                // The pre-0.2.2 default was exactly [{"id":"codex","enabled":true}] — never a
-                // user choice; treat it as empty so the registry order keeps applying.
-                if (list.Count == 1 && list[0].Id == "codex" && list[0].Enabled) list.Clear();
                 if (list.Count > 0) Providers = list;
             }
 
@@ -184,7 +183,9 @@ namespace AiUsageWidget.Core
             foreach (object o in raw)
             {
                 string s = o as string;
-                if (!string.IsNullOrEmpty(s)) list.Add(s);
+                if (string.IsNullOrEmpty(s)) continue;
+                if (list.Contains(s)) continue;   // de-duplicated, order kept
+                list.Add(s);
             }
             return list;
         }
@@ -228,7 +229,12 @@ namespace AiUsageWidget.Core
 
             string dir = Path.GetDirectoryName(path);
             if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir)) Directory.CreateDirectory(dir);
-            File.WriteAllText(path, Json.Serialize(outDict));
+            // Atomic (temp file, then replace) and indented, since hand-editing is how most
+            // settings are changed.
+            string tmp = path + ".tmp";
+            File.WriteAllText(tmp, Json.SerializeIndented(outDict));
+            if (File.Exists(path)) File.Replace(tmp, path, null);
+            else File.Move(tmp, path);
         }
 
         // settings.json controls order and enablement; registered providers missing from the

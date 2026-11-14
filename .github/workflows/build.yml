@@ -1,0 +1,24 @@
+name: build
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build and run self-tests
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File build.ps1 -Version 0.0.0
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: AiUsageWidget
+          path: |
+            bin/AiUsageWidget.exe
+            bin/selftest.log

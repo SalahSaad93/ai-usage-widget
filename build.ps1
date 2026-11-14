@@ -36,7 +36,10 @@ using System.Reflection;
 
 $csc = Join-Path $env:WINDIR "Microsoft.NET\Framework64\v4.0.30319\csc.exe"
 if (-not (Test-Path $csc)) {
-    Write-Error "in-box csc.exe not found at $csc"
+    $csc = Join-Path $env:WINDIR "Microsoft.NET\Framework\v4.0.30319\csc.exe"
+}
+if (-not (Test-Path $csc)) {
+    Write-Error "in-box csc.exe not found under $env:WINDIR\Microsoft.NET"
     exit 1
 }
 
@@ -65,7 +68,7 @@ $cscArgs = @(
     "/langversion:5",
     "/warnaserror+",
     "/target:winexe",
-    "/platform:x64",
+    "/platform:anycpu",
     "/optimize+",
     "/codepage:65001",
     $manifestArg,

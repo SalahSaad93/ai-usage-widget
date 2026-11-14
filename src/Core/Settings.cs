@@ -26,6 +26,14 @@ namespace AiUsageWidget.Core
 
         public static string LogPath { get { return Path.Combine(DataDir, "log.txt"); } }
 
+        public static string HistoryPath { get { return Path.Combine(DataDir, "history.json"); } }
+
+        // One DPAPI-protected file per named secret (see SecretStore).
+        public static string SecretPath(string name)
+        {
+            return Path.Combine(DataDir, "secret-" + name + ".bin");
+        }
+
         public static string UpdateDir { get { return Path.Combine(DataDir, "update"); } }
 
         public static string TokenPath { get { return Path.Combine(DataDir, "update-token.bin"); } }
@@ -68,8 +76,23 @@ namespace AiUsageWidget.Core
         }
     }
 
+    public sealed class NotificationSettings
+    {
+        public bool Enabled = true;
+        public List<int> Thresholds = new List<int> { 80, 95 };   // percent used; crossing one notifies
+        public bool OnReset;
+    }
+
     public sealed class Settings
     {
+        public string Theme = "system";        // system | dark | light
+        public int Opacity = 100;              // 40..100, percent
+        public int WarnPercent = 50;           // bars turn yellow from here
+        public int CriticalPercent = 70;       // and red above this
+        public NotificationSettings Notifications = new NotificationSettings();
+        public int HistoryDays = 30;           // how long usage samples are kept
+        public bool TrayHintShown;             // the one-time "still running in the tray" balloon
+        public bool ConsentDone;               // the first-run "choose what to show" window was answered
         public int RefreshMinutes = 5;
         public string Layout = "detailed";
         public bool AlwaysOnTop = true;
@@ -158,6 +181,41 @@ namespace AiUsageWidget.Core
             }
 
             AutoDetect = Json.GetBool(d, "autoDetect", true);
+
+            string theme = Json.GetStr(d, "theme");
+            if (theme == "system" || theme == "dark" || theme == "light") Theme = theme;
+            Opacity = Clamp(Json.GetInt(d, "opacity", 100), 40, 100);
+            WarnPercent = Clamp(Json.GetInt(d, "warnPercent", 50), 1, 98);
+            CriticalPercent = Clamp(Json.GetInt(d, "criticalPercent", 70), WarnPercent + 1, 99);
+            HistoryDays = Clamp(Json.GetInt(d, "historyDays", 30), 1, 365);
+            TrayHintShown = Json.GetBool(d, "trayHintShown", false);
+            ConsentDone = Json.GetBool(d, "consentDone", false);
+            var notifyIn = Json.GetObject(d, "notifications");
+            if (notifyIn != null)
+            {
+                Notifications.Enabled = Json.GetBool(notifyIn, "enabled", true);
+                Notifications.OnReset = Json.GetBool(notifyIn, "onReset", false);
+                List<object> thresholds = Json.GetArray(notifyIn, "thresholds");
+                if (thresholds != null)
+                {
+                    var parsed = new List<int>();
+                    foreach (object o in thresholds)
+                    {
+                        int value;
+                        try
+                        {
+                            value = Convert.ToInt32(o, System.Globalization.CultureInfo.InvariantCulture);
+                        }
+                        catch (Exception)
+                        {
+                            continue;
+                        }
+                        if (value >= 1 && value <= 100 && !parsed.Contains(value)) parsed.Add(value);
+                    }
+                    parsed.Sort();
+                    Notifications.Thresholds = parsed;
+                }
+            }
             List<string> dismissed = GetStringList(d, "dismissedSuggestions");
             if (dismissed != null) DismissedSuggestions = dismissed;
             List<string> announced = GetStringList(d, "announcedSuggestions");
@@ -224,6 +282,19 @@ namespace AiUsageWidget.Core
             outDict["update"] = updateDict;
 
             outDict["autoDetect"] = AutoDetect;
+            outDict["theme"] = Theme;
+            outDict["opacity"] = Clamp(Opacity, 40, 100);
+            outDict["warnPercent"] = WarnPercent;
+            outDict["criticalPercent"] = CriticalPercent;
+            outDict["historyDays"] = HistoryDays;
+            outDict["trayHintShown"] = TrayHintShown;
+            outDict["consentDone"] = ConsentDone;
+            var notifyOut = Json.GetObject(raw, "notifications");
+            if (notifyOut == null) notifyOut = new Dictionary<string, object>();
+            notifyOut["enabled"] = Notifications.Enabled;
+            notifyOut["onReset"] = Notifications.OnReset;
+            notifyOut["thresholds"] = new List<int>(Notifications.Thresholds);
+            outDict["notifications"] = notifyOut;
             outDict["dismissedSuggestions"] = new List<string>(DismissedSuggestions);
             outDict["announcedSuggestions"] = new List<string>(AnnouncedSuggestions);
             outDict["knownProviders"] = new List<string>(KnownProviders);

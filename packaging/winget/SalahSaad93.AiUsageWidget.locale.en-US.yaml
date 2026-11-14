@@ -1,0 +1,19 @@
+PackageIdentifier: SalahSaad93.AiUsageWidget
+PackageVersion: 0.4.0
+PackageLocale: en-US
+Publisher: AI Usage Widget contributors
+PackageName: AI Usage Widget
+PackageUrl: https://github.com/SalahSaad93/ai-usage-widget
+License: MIT
+LicenseUrl: https://github.com/SalahSaad93/ai-usage-widget/blob/main/LICENSE
+PrivacyUrl: https://github.com/SalahSaad93/ai-usage-widget/blob/main/PRIVACY.md
+ShortDescription: Always-on-top Windows widget showing the usage of your AI subscriptions in one window.
+Tags:
+  - ai
+  - usage
+  - widget
+  - claude
+  - codex
+ReleaseNotesUrl: https://github.com/SalahSaad93/ai-usage-widget/releases/tag/v0.4.0
+ManifestType: defaultLocale
+ManifestVersion: 1.6.0

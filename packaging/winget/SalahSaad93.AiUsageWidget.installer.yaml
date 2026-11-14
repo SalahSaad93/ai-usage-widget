@@ -1,0 +1,11 @@
+PackageIdentifier: SalahSaad93.AiUsageWidget
+PackageVersion: 0.4.0
+InstallerType: portable
+Commands:
+  - ai-usage-widget
+Installers:
+  - Architecture: neutral
+    InstallerUrl: https://github.com/SalahSaad93/ai-usage-widget/releases/download/v0.4.0/AiUsageWidget.exe
+    InstallerSha256: 2644FF609D0E827AD21E6BBC1DC4725DF3630A38B203AD55098AD46FA359FFFB
+ManifestType: installer
+ManifestVersion: 1.6.0

@@ -42,8 +42,20 @@ initialisers, no `out var`, no pattern matching, no tuples, and no `await` in ca
    vendor offers an official CLI command for usage (Muse, Antigravity), run that CLI instead of
    touching its credentials at all.
 
-New providers also register in `ProviderRegistry.All` (the array order is the row order). The full
-recipe is section 11 of `docs/DESIGN.md`; add new self-test checks at the end of `SelfTest.cs`.
+New providers also register in `ProviderRegistry.All` (the array order is the row order). An
+experimental provider — one whose endpoint is unofficial or whose mapping is not yet verified
+against live output — also goes in `ProviderRegistry.ExperimentalIds`, which keeps it hidden
+until the user explicitly enables it. The full recipe is section 15 of `docs/DESIGN.md`; add new
+self-test checks at the end of `SelfTest.cs`.
+
+## Releases
+
+A release is cut with `release.ps1`, which signs the update manifest (`latest.json`). The machine
+cutting the release therefore needs the private signing key; `tools\new-update-key.ps1` creates
+a key pair and saves the private half to
+`%USERPROFILE%\.ai-usage-widget\update-signing-key.xml`. The public half is compiled into the exe
+(`UpdateKey.PublicKeyXml`); a build without it disables update checks. Details are section 13 of
+`docs/DESIGN.md`.
 
 ## One task per pull request
 

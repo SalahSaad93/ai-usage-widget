@@ -2,6 +2,6 @@ namespace AiUsageWidget.Core
 {
     public static class UpdateKey
     {
-        public const string PublicKeyXml = "";
+        public const string PublicKeyXml = "<RSAKeyValue><Modulus>tW8zCYnZq28Enq5BBrdeyv3H9idLAMOOT5vYioizlOUyXP0xwdIkRj53If9tWm1hKTUrrLDgyL/JicTs7cXGxb8xOqqfII7w40xbreGlaI2PUfwEaPQr5uP72cKYBrN5xHfma51t4R6dx9VyA8g4dYKwFOf7Xqrr762RLsbdjResL/PiwYzZdMjy9diwYCd4Q3yooWpLyIWOwGQbvnvelr6cFUiQLiHbfas5t3TuR+LRb9O6dIEn06W6WKTI1lKhuU4ZenuxIUa/LHi7rCEAzR4yldG1dArwmKkohL6QicHTeg3mYqKIK6xrVWC3LcJ+OAPbzMfK0H7Yooo7DZsds93dI9vKd2jzNCE7AlW+rR2GVtGY/FSm3RJVS6ix3Xarvj12At9jzEmT4ssEfdGwDnhOceL2g+t1g2XcE4vvXDl1KFyELI8ErfG78uYeD1CG64ttFp5dk4DkD504tSBfCuli1X04WySnaImk0FtRpqsgJ7AyXLrdawfu/2x59CE5</Modulus><Exponent>AQAB</Exponent></RSAKeyValue>";
     }
 }

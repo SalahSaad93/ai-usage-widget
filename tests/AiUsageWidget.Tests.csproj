@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <!-- The headless checks and the screenshot renderer, as a separate exe that references
-       the widget. Run: bin\sdk\AiUsageWidget.Tests.exe [--out <file>] [--screenshots <dir>] -->
+       the widget. Options are described at the top of TestProgram.cs. -->
   <PropertyGroup>
     <OutputType>Exe</OutputType>
     <TargetFramework>net48</TargetFramework>

@@ -73,6 +73,15 @@ namespace AiUsageWidget
             Check(lines, "painter_extended_rows_and_columns", PainterExtendedRowsAndColumns);
             Check(lines, "update_signature_verifies", UpdateSignatureVerifies);
             Check(lines, "unsigned_build_disables_updates", UnsignedBuildDisablesUpdates);
+            Check(lines, "openrouter_fixture_mapping", OpenRouterFixtureMapping);
+            Check(lines, "openrouter_no_limit_and_resets", OpenRouterNoLimitAndResets);
+            Check(lines, "openrouter_key_sources", OpenRouterKeySources);
+            Check(lines, "cursor_fixture_mapping", CursorFixtureMapping);
+            Check(lines, "cursor_token_and_auth_states", CursorTokenAndAuthStates);
+            Check(lines, "cursor_sqlite_wrapper", CursorSqliteWrapper);
+            Check(lines, "copilot_fixture_mapping", CopilotFixtureMapping);
+            Check(lines, "copilot_token_sources", CopilotTokenSources);
+            Check(lines, "new_providers_registry_and_help", NewProvidersRegistryAndHelp);
 
             string[] all = lines.ToArray();
             if (!string.IsNullOrEmpty(outPath)) File.WriteAllLines(outPath, all, new UTF8Encoding(false)); // no BOM: the log must start with PASS
@@ -405,16 +414,19 @@ namespace AiUsageWidget
             string path = Path.Combine(AppPaths.DataDir, "settings-order.json");
 
             // No settings at all: every provider, enabled, in registry order — except the
-            // experimental one (antigravity), which is never shown automatically.
+            // experimental ones (antigravity, cursor, github-copilot), which are never shown
+            // automatically.
             Settings s = Settings.Load(path);
             List<IUsageProvider> merged = s.MergeProviders(registry);
-            That(merged.Count == registry.Length - 1,
+            That(merged.Count == registry.Length - ProviderRegistry.ExperimentalIds.Length,
                 "empty settings -> every non-experimental provider, got " + merged.Count);
             for (int i = 0; i < merged.Count; i++)
-                That(merged[i].Id != "antigravity", "experimental provider never auto-shown");
+                That(Array.IndexOf(ProviderRegistry.ExperimentalIds, merged[i].Id) < 0,
+                    "experimental provider never auto-shown");
             That(merged[0].Id == "claude-code", "default first provider is claude-code");
             That(merged[1].Id == "codex" && merged[2].Id == "zai" &&
-                merged[3].Id == "opencode-go" && merged[4].Id == "muse",
+                merged[3].Id == "openrouter" && merged[4].Id == "opencode-go" &&
+                merged[5].Id == "muse",
                 "registry order kept around the skipped experimental");
 
             // A single [codex] entry is a real user choice now (the pre-0.2.2 migration
@@ -422,20 +434,21 @@ namespace AiUsageWidget
             File.WriteAllText(path, "{\"providers\":[{\"id\":\"codex\",\"enabled\":true}]}");
             s = Settings.Load(path);
             merged = s.MergeProviders(registry);
-            That(merged.Count == registry.Length - 1,
+            That(merged.Count == registry.Length - ProviderRegistry.ExperimentalIds.Length,
                 "explicit [codex] keeps every non-experimental provider");
             That(merged[0].Id == "codex", "explicit [codex] is honoured, got " + merged[0].Id);
 
             // An explicit list controls order and enablement; unnamed ids append enabled in
-            // registry order (the experimental one still only by explicit entry).
+            // registry order (the experimental ones still only by explicit entry).
             File.WriteAllText(path, "{\"providers\":[{\"id\":\"zai\",\"enabled\":true}," +
                 "{\"id\":\"codex\",\"enabled\":false}]}");
             s = Settings.Load(path);
             merged = s.MergeProviders(registry);
-            That(merged.Count == registry.Length - 2, "disabled codex dropped, got " + merged.Count);
+            That(merged.Count == registry.Length - ProviderRegistry.ExperimentalIds.Length - 1,
+                "disabled codex dropped, got " + merged.Count);
             That(merged[0].Id == "zai", "explicit list puts zai first");
-            That(merged[1].Id == "claude-code" && merged[2].Id == "opencode-go" &&
-                merged[3].Id == "muse",
+            That(merged[1].Id == "claude-code" && merged[2].Id == "openrouter" &&
+                merged[3].Id == "opencode-go" && merged[4].Id == "muse",
                 "unnamed providers append in registry order");
 
             // Saving untouched defaults must not write the merged list back: a later load
@@ -448,7 +461,8 @@ namespace AiUsageWidget
                 "save writes no merged provider ids, got " + saved);
             s = Settings.Load(freshPath);
             merged = s.MergeProviders(registry);
-            That(merged.Count == registry.Length - 1 && merged[0].Id == "claude-code",
+            That(merged.Count == registry.Length - ProviderRegistry.ExperimentalIds.Length &&
+                merged[0].Id == "claude-code",
                 "saved empty list keeps registry order");
         }
 
@@ -1244,7 +1258,7 @@ namespace AiUsageWidget
 
             That(KnownTools.HelpText("antigravity") == "Install the agy CLI and sign in to see usage",
                 "tray help line");
-            That(KnownTools.HelpText("cursor") == null, "no help line for other tools");
+            That(KnownTools.HelpText("gemini-cli") == null, "no help line for other tools");
         }
 
         // A Stale row's tag gains the snapshot's own message: "stale 42m · sign in needed:
@@ -1689,6 +1703,396 @@ namespace AiUsageWidget
             var updater = new Updater(cfg, "unused.exe", new Version(0, 1), "");
             updater.CheckAsync().GetAwaiter().GetResult();
             That(updater.StatusText == "updates disabled (unsigned build)", "unsigned status");
+        }
+
+        // --- OpenRouter -----------------------------------------------------------------
+
+        static void OpenRouterFixtureMapping()
+        {
+            string json = File.ReadAllText(FixturePath("openrouter-key.json"));
+            DateTime now = new DateTime(2026, 11, 14, 15, 30, 0, DateTimeKind.Utc);
+            UsageSnapshot s = OpenRouterProvider.Parse(json, now);
+            That(s.Status == ProviderStatus.Ok, "status should be Ok, got " + s.Status);
+            That(s.PlanName == "", "a paid key has no plan name, got '" + s.PlanName + "'");
+            That(s.Windows.Count == 1, "exactly one window expected, got " + s.Windows.Count);
+            UsageWindow w = s.Windows[0];
+            That(w.Primary && w.Key == "limit" && w.Label == "key limit" && w.Unit == "USD",
+                "window identity");
+            That(w.Kind == WindowKind.Monthly && w.DurationSeconds.HasValue &&
+                w.DurationSeconds.Value == 2592000, "monthly from limit_reset");
+            That(w.Used.HasValue && w.Used.Value == 32.5 && w.Limit.HasValue &&
+                w.Limit.Value == 100, "used = limit - limit_remaining");
+            That(w.UsedPercent == 32.5, "percent from used and limit");
+            That(w.ResetsAtUtc.HasValue &&
+                w.ResetsAtUtc.Value == new DateTime(2026, 12, 1, 0, 0, 0, DateTimeKind.Utc),
+                "monthly reset is the first of the next month");
+        }
+
+        static void OpenRouterNoLimitAndResets()
+        {
+            DateTime now = new DateTime(2026, 11, 14, 15, 30, 0, DateTimeKind.Utc);
+
+            string json = "{\"data\":{\"label\":\"k\",\"limit\":null,\"limit_remaining\":null," +
+                "\"usage\":20.5,\"usage_monthly\":12.3,\"is_free_tier\":true}}";
+            UsageSnapshot s = OpenRouterProvider.Parse(json, now);
+            That(s.Status == ProviderStatus.Ok, "no limit is still Ok");
+            That(s.Windows.Count == 0, "no windows without a limit");
+            That(s.PlanName == "Free", "free tier plan name");
+            That(s.Message == "no limit set: $12.30 used this month",
+                "monthly usage message, got '" + s.Message + "'");
+
+            // The response carries no reset wall clock, so the reset time is derived from
+            // the cadence and the injected now (2026-11-14 is a Saturday).
+            That(OpenRouterProvider.NextResetUtc(now, "daily") ==
+                new DateTime(2026, 11, 15, 0, 0, 0, DateTimeKind.Utc),
+                "daily -> next UTC midnight");
+            That(OpenRouterProvider.NextResetUtc(
+                new DateTime(2026, 11, 14, 0, 0, 0, DateTimeKind.Utc), "daily") ==
+                new DateTime(2026, 11, 15, 0, 0, 0, DateTimeKind.Utc),
+                "daily at midnight -> next midnight");
+            That(OpenRouterProvider.NextResetUtc(now, "weekly") ==
+                new DateTime(2026, 11, 16, 0, 0, 0, DateTimeKind.Utc),
+                "weekly -> next Monday 00:00 UTC");
+            That(OpenRouterProvider.NextResetUtc(
+                new DateTime(2026, 11, 16, 0, 0, 0, DateTimeKind.Utc), "weekly") ==
+                new DateTime(2026, 11, 23, 0, 0, 0, DateTimeKind.Utc),
+                "Monday 00:00 -> a full week later");
+            That(OpenRouterProvider.NextResetUtc(
+                new DateTime(2026, 11, 30, 23, 0, 0, DateTimeKind.Utc), "monthly") ==
+                new DateTime(2026, 12, 1, 0, 0, 0, DateTimeKind.Utc),
+                "monthly -> first of next month");
+            That(OpenRouterProvider.NextResetUtc(
+                new DateTime(2026, 12, 15, 0, 0, 0, DateTimeKind.Utc), "monthly") ==
+                new DateTime(2027, 1, 1, 0, 0, 0, DateTimeKind.Utc), "year rollover");
+            That(!OpenRouterProvider.NextResetUtc(now, null).HasValue, "no cadence -> no reset");
+            That(!OpenRouterProvider.NextResetUtc(now, "never").HasValue,
+                "unknown cadence -> no reset");
+
+            // An unknown cadence still yields the window: Other, no duration, no reset.
+            string other = "{\"data\":{\"limit\":50,\"limit_remaining\":25," +
+                "\"limit_reset\":\"never\",\"is_free_tier\":false}}";
+            UsageSnapshot o = OpenRouterProvider.Parse(other, now);
+            That(o.Status == ProviderStatus.Ok && o.Windows.Count == 1,
+                "unknown cadence keeps the window");
+            That(o.Windows[0].Kind == WindowKind.Other && !o.Windows[0].DurationSeconds.HasValue &&
+                !o.Windows[0].ResetsAtUtc.HasValue, "unknown cadence -> Other, undated");
+
+            UsageSnapshot bad = OpenRouterProvider.Parse("{\"error\":\"nope\"}", now);
+            That(bad.Status == ProviderStatus.Error && bad.Message == "unexpected response",
+                "missing data block -> Error");
+        }
+
+        static void OpenRouterKeySources()
+        {
+            string oldKey = Environment.GetEnvironmentVariable(OpenRouterProvider.EnvVarName);
+            var provider = new OpenRouterProvider();
+            try
+            {
+                Environment.SetEnvironmentVariable(OpenRouterProvider.EnvVarName, null);
+                SecretStore.Clear(OpenRouterProvider.SecretName);
+                That(!provider.IsDetected(), "no env key, no stored secret");
+                UsageSnapshot s = provider.FetchAsync(CancellationToken.None).GetAwaiter().GetResult();
+                That(s.Status == ProviderStatus.NotConfigured, "no key -> NotConfigured, no network");
+                That(s.Windows.Count == 0, "no windows on NotConfigured");
+
+                SecretStore.Save(OpenRouterProvider.SecretName, "selftest-placeholder");
+                That(provider.IsDetected(), "the stored secret counts as a key source");
+                SecretStore.Clear(OpenRouterProvider.SecretName);
+
+                Environment.SetEnvironmentVariable(OpenRouterProvider.EnvVarName, "selftest-placeholder");
+                That(provider.IsDetected(), "the environment variable counts as a key source");
+            }
+            finally
+            {
+                Environment.SetEnvironmentVariable(OpenRouterProvider.EnvVarName, oldKey);
+                SecretStore.Clear(OpenRouterProvider.SecretName);
+            }
+        }
+
+        // --- Cursor ---------------------------------------------------------------------
+
+        static void CursorFixtureMapping()
+        {
+            string json = File.ReadAllText(FixturePath("cursor-usage-synthetic.json"));
+            UsageSnapshot s = CursorProvider.Parse(json, "pro");
+            That(s.Status == ProviderStatus.Ok, "status should be Ok, got " + s.Status);
+            That(s.PlanName == "Pro", "plan from the membership hint, got '" + s.PlanName + "'");
+            That(s.Windows.Count == 1, "exactly one window expected, got " + s.Windows.Count);
+            UsageWindow w = s.Windows[0];
+            That(w.Primary && w.Key == "cycle" && w.Label == "billing cycle", "window identity");
+            That(w.Kind == WindowKind.Monthly, "the billing cycle window is monthly");
+            That(w.UsedPercent == 42.5, "percent from planUsage.totalPercentUsed");
+            That(w.Used.HasValue && w.Used.Value == 1200 && w.Limit.HasValue &&
+                w.Limit.Value == 2000 && w.Unit == "cents", "absolute spend in cents");
+            That(w.DurationSeconds.HasValue && w.DurationSeconds.Value == 2592000,
+                "duration from the cycle dates (November)");
+            That(w.ResetsAtUtc.HasValue &&
+                w.ResetsAtUtc.Value == new DateTime(2026, 12, 1, 0, 0, 0, DateTimeKind.Utc),
+                "reset at billingCycleEnd");
+
+            // Tolerant shapes: epoch milliseconds as numbers, percent at the root, no spend.
+            string numbers = "{\"billingCycleStart\":1793577600000,\"billingCycleEnd\":1794787200000," +
+                "\"totalPercentUsed\":7}";
+            UsageSnapshot n = CursorProvider.Parse(numbers, "free");
+            That(n.Status == ProviderStatus.Ok && n.Windows.Count == 1, "epoch ms numbers parse");
+            That(n.Windows[0].UsedPercent == 7 && !n.Windows[0].Used.HasValue &&
+                !n.Windows[0].Limit.HasValue && n.Windows[0].Unit == null,
+                "root percent, no absolute fields");
+            That(n.Windows[0].DurationSeconds.HasValue && n.Windows[0].DurationSeconds.Value == 1209600,
+                "duration from epoch dates (fortnight)");
+            That(n.Windows[0].ResetsAtUtc.HasValue && n.Windows[0].ResetsAtUtc.Value ==
+                new DateTime(2026, 11, 16, 0, 0, 0, DateTimeKind.Utc), "epoch ms end date");
+            That(n.PlanName == "Free", "membership capitalised");
+
+            // Epoch milliseconds quoted as strings, percent under planUsage.
+            string quoted = "{\"billingCycleStart\":\"1793577600000\"," +
+                "\"billingCycleEnd\":\"1794787200000\",\"planUsage\":{\"totalPercentUsed\":55}}";
+            UsageSnapshot q = CursorProvider.Parse(quoted, null);
+            That(q.Windows.Count == 1 && q.Windows[0].UsedPercent == 55, "quoted epoch ms parse");
+            That(q.Windows[0].DurationSeconds.HasValue && q.Windows[0].DurationSeconds.Value == 1209600,
+                "duration from quoted epoch dates");
+            That(q.PlanName == "", "missing membership -> no plan name");
+
+            // No percent anywhere -> Error even with dates present.
+            UsageSnapshot noPercent = CursorProvider.Parse(
+                "{\"billingCycleStart\":\"2026-11-01T00:00:00Z\",\"planUsage\":{\"limit\":100}}",
+                "pro");
+            That(noPercent.Status == ProviderStatus.Error &&
+                noPercent.Message == "unexpected response", "no percent -> Error");
+
+            UsageSnapshot garbage = CursorProvider.Parse("nope", "pro");
+            That(garbage.Status == ProviderStatus.Error, "garbage body -> Error");
+        }
+
+        static string TestJwt(double expEpochSeconds)
+        {
+            string payload = "{\"exp\":" + expEpochSeconds.ToString(CultureInfo.InvariantCulture) + "}";
+            return "eyJhbGciOiJQUzI1NiIsInR5cCI6IkpXVCJ9." +
+                Convert.ToBase64String(Encoding.UTF8.GetBytes(payload))
+                    .TrimEnd('=').Replace('+', '-').Replace('/', '_') + ".sig";
+        }
+
+        static void CursorTokenAndAuthStates()
+        {
+            DateTime now = new DateTime(2026, 11, 14, 12, 0, 0, DateTimeKind.Utc);
+            That(!CursorProvider.IsTokenExpired(TestJwt(4102444800), now), "exp 2100 -> live");
+            That(CursorProvider.IsTokenExpired(TestJwt(1000), now), "exp 1970 -> expired");
+            That(CursorProvider.IsTokenExpired(TestJwt(1794657600), now), "exp now -> expired");
+            That(!CursorProvider.IsTokenExpired(null, now), "null token -> not expired");
+            That(!CursorProvider.IsTokenExpired("garbage", now), "no payload -> not expired");
+            That(!CursorProvider.IsTokenExpired("a.b.c", now), "payload not base64 -> not expired");
+            That(!CursorProvider.IsTokenExpired("x.####.y", now), "bad base64url -> not expired");
+            That(!CursorProvider.IsTokenExpired(
+                "h." + Convert.ToBase64String(Encoding.UTF8.GetBytes("{\"sub\":\"u\"}"))
+                    .TrimEnd('=').Replace('+', '-').Replace('/', '_') + ".s", now),
+                "payload without exp -> not expired");
+
+            string root = Path.Combine(AppPaths.DataDir, "cursor");
+            Directory.CreateDirectory(root);
+
+            // No database file: NotConfigured, and the value reader is never called.
+            string missing = Path.Combine(root, "missing.vscdb");
+            var notThere = new CursorProvider(missing, delegate(string key)
+            {
+                throw new InvalidOperationException("reader must not run without a database");
+            });
+            UsageSnapshot s = notThere.FetchAsync(CancellationToken.None).GetAwaiter().GetResult();
+            That(s.Status == ProviderStatus.NotConfigured, "missing db -> NotConfigured");
+
+            // A database file without a token: NotConfigured, no network. The injected
+            // reader bypasses sqlite, so a text file stands in for the database.
+            string db = Path.Combine(root, "state.vscdb");
+            File.WriteAllText(db, "not a real database");
+            var noToken = new CursorProvider(db, delegate(string key) { return null; });
+            s = noToken.FetchAsync(CancellationToken.None).GetAwaiter().GetResult();
+            That(s.Status == ProviderStatus.NotConfigured, "no token -> NotConfigured, no network");
+
+            // An expired token: AuthRequired straight from the database, no network.
+            var stale = new CursorProvider(db, delegate(string key)
+            {
+                return key == CursorProvider.TokenKey ? TestJwt(1000) : "pro";
+            });
+            s = stale.FetchAsync(CancellationToken.None).GetAwaiter().GetResult();
+            That(s.Status == ProviderStatus.AuthRequired, "expired token -> AuthRequired");
+            That(s.Message == "sign in needed: open Cursor",
+                "expiry message, got '" + s.Message + "'");
+        }
+
+        static void CursorSqliteWrapper()
+        {
+            // Degenerate inputs return null without touching the dll.
+            That(Sqlite.ReadValue(null, "ItemTable", "k") == null, "null path");
+            That(Sqlite.ReadValue("", "ItemTable", "k") == null, "empty path");
+            That(Sqlite.ReadValue(Path.Combine(AppPaths.DataDir, "missing.vscdb"), "ItemTable",
+                "k") == null, "missing database");
+
+            // winsqlite3.dll ships with Windows 10/11; anywhere it is absent the nulls above
+            // come from the DllNotFound catch and the real-database half is skipped. The
+            // wrapper is read-only, so the fixture database ships as a binary fixture rather
+            // than being created here.
+            if (!Detection.FileExists(Path.Combine(Environment.SystemDirectory, "winsqlite3.dll")))
+                return;
+
+            string db = FixturePath("state.vscdb");
+            That(Sqlite.ReadValue(db, "ItemTable", "cursorAuth/accessToken") == "header.payload.sig",
+                "text value read");
+            That(Sqlite.ReadValue(db, "ItemTable", "cursorAuth/stripeMembershipType") == "pro",
+                "second text value read");
+            That(Sqlite.ReadValue(db, "ItemTable", "cursorAuth/blobToken") == "stored-as-blob",
+                "utf-8 blob value read");
+            That(Sqlite.ReadValue(db, "ItemTable", "no-such-key") == null, "missing row -> null");
+            That(Sqlite.ReadValue(db, "NoSuchTable", "k") == null, "missing table -> null");
+            That(Sqlite.ReadValue(db, "ItemTable WHERE 1=1 --", "k") == null,
+                "junk table -> null");
+            string notDb = Path.Combine(AppPaths.DataDir, "not-a-db.vscdb");
+            File.WriteAllText(notDb, "not a database");
+            That(Sqlite.ReadValue(notDb, "ItemTable", "k") == null, "non-database file -> null");
+        }
+
+        // --- GitHub Copilot -------------------------------------------------------------
+
+        static void CopilotFixtureMapping()
+        {
+            string json = File.ReadAllText(FixturePath("copilot-user-synthetic.json"));
+            UsageSnapshot s = CopilotProvider.Parse(json);
+            That(s.Status == ProviderStatus.Ok, "status should be Ok, got " + s.Status);
+            That(s.PlanName == "Business", "plan from copilot_plan, got '" + s.PlanName + "'");
+            That(s.Windows.Count == 2, "two quota blocks expected, got " + s.Windows.Count);
+
+            UsageWindow premium = s.Windows[0];
+            That(premium.Primary && premium.Key == "premium_interactions" &&
+                premium.Label == "premium requests", "premium window identity");
+            That(premium.Kind == WindowKind.Monthly, "quota windows are monthly");
+            That(premium.UsedPercent == 25, "percent = 100 - percent_remaining");
+            That(premium.Used.HasValue && premium.Used.Value == 75 && premium.Limit.HasValue &&
+                premium.Limit.Value == 300 && premium.Unit == "requests", "absolute requests");
+            That(premium.ResetsAtUtc.HasValue &&
+                premium.ResetsAtUtc.Value == new DateTime(2026, 12, 1, 0, 0, 0, DateTimeKind.Utc),
+                "reset from quota_reset_date");
+
+            UsageWindow chat = s.Windows[1];
+            That(!chat.Primary && chat.Key == "chat" && chat.Label == "chat",
+                "chat window identity");
+            That(chat.UsedPercent == 0, "chat percent");
+
+            // An unlimited block is skipped entirely; the other block keeps its absolute
+            // fields only when both exist.
+            string unlimited = "{\"copilot_plan\":\"pro\",\"quota_reset_date\":\"2027-01-01T08:30:00Z\"," +
+                "\"quota_snapshots\":{\"premium_interactions\":{\"unlimited\":true}," +
+                "\"chat\":{\"percent_remaining\":90}}}";
+            UsageSnapshot u = CopilotProvider.Parse(unlimited);
+            That(u.Status == ProviderStatus.Ok && u.Windows.Count == 1, "unlimited block skipped");
+            That(u.Windows[0].Key == "chat" && u.Windows[0].UsedPercent == 10,
+                "remaining percent mapped");
+            That(!u.Windows[0].Used.HasValue && !u.Windows[0].Limit.HasValue,
+                "no absolute fields when absent");
+            That(u.Windows[0].ResetsAtUtc.HasValue && u.Windows[0].ResetsAtUtc.Value ==
+                new DateTime(2027, 1, 1, 8, 30, 0, DateTimeKind.Utc), "date-time reset honoured");
+
+            // A block without a percent is skipped too; a plan alone then reads as Ok.
+            UsageSnapshot noPercent = CopilotProvider.Parse(
+                "{\"copilot_plan\":\"pro\",\"quota_snapshots\":{\"chat\":{\"entitlement\":5}}}");
+            That(noPercent.Status == ProviderStatus.Ok && noPercent.Windows.Count == 0,
+                "block without percent skipped");
+            That(noPercent.Message == "no quota reported", "plan with no blocks -> Ok message");
+
+            // No blocks at all: Ok with a plan, Error without one.
+            UsageSnapshot planOnly = CopilotProvider.Parse("{\"copilot_plan\":\"free\"}");
+            That(planOnly.Status == ProviderStatus.Ok && planOnly.Windows.Count == 0 &&
+                planOnly.Message == "no quota reported", "plan-only -> Ok, no quota reported");
+            UsageSnapshot bare = CopilotProvider.Parse("{}");
+            That(bare.Status == ProviderStatus.Error && bare.Message == "unexpected response",
+                "no plan and no blocks -> Error");
+            UsageSnapshot garbage = CopilotProvider.Parse("nope");
+            That(garbage.Status == ProviderStatus.Error, "garbage body -> Error");
+        }
+
+        static void CopilotTokenSources()
+        {
+            // The four candidate files, LOCALAPPDATA before the profile folder.
+            string profile = Path.Combine(Path.GetTempPath(), "profile-fixture");
+            string local = Path.Combine(Path.GetTempPath(), "local-fixture");
+            string[] files = CopilotProvider.DefaultCredentialFiles(local, profile);
+            That(files.Length == 4, "four credential candidates");
+            That(files[0] == Path.Combine(local, "github-copilot", "apps.json"), "first candidate");
+            That(files[3] == Path.Combine(profile, ".config", "github-copilot", "hosts.json"),
+                "last candidate");
+
+            // Token extraction from both file shapes.
+            That(CopilotProvider.FirstOAuthToken(
+                "{\"github.com\":{\"user\":\"octocat\",\"oauth_token\":\"tok-hosts\"}}") ==
+                "tok-hosts", "hosts.json shape");
+            That(CopilotProvider.FirstOAuthToken(
+                "{\"github.com:device\":{\"oauth_token\":\"tok-apps\"}}") == "tok-apps",
+                "apps.json shape");
+            That(CopilotProvider.FirstOAuthToken("{\"other\":{\"oauth_token\":\"tok\"}}") == null,
+                "non-github key ignored");
+            That(CopilotProvider.FirstOAuthToken("{\"github.com\":{\"oauth_token\":\"\"}}") == null,
+                "empty token ignored");
+            That(CopilotProvider.FirstOAuthToken("{\"github.com\":\"plain\"}") == null,
+                "non-object value ignored");
+            That(CopilotProvider.FirstOAuthToken("nope") == null, "garbage file ignored");
+
+            // The first existing file wins.
+            string root = Path.Combine(AppPaths.DataDir, "copilot");
+            Directory.CreateDirectory(root);
+            string hosts = Path.Combine(root, "hosts.json");
+            string apps = Path.Combine(root, "apps.json");
+            File.WriteAllText(apps, "{\"github.com\":{\"oauth_token\":\"tok-apps\"}}");
+            That(CopilotProvider.FindOAuthToken(new[] { hosts, apps }) == "tok-apps",
+                "missing first file skipped");
+            File.WriteAllText(hosts, "{\"github.com\":{\"oauth_token\":\"tok-hosts\"}}");
+            That(CopilotProvider.FindOAuthToken(new[] { hosts, apps }) == "tok-hosts",
+                "first file wins");
+            That(CopilotProvider.FindOAuthToken(null) == null, "no files -> no token");
+
+            // Detection and the no-token fetch states, against temp files only.
+            string missingApps = Path.Combine(root, "nope-apps.json");
+            string missingHosts = Path.Combine(root, "nope-hosts.json");
+            var absent = new CopilotProvider(new[] { missingApps, missingHosts });
+            That(!absent.IsDetected(), "no credential file -> not detected");
+            UsageSnapshot s = absent.FetchAsync(CancellationToken.None).GetAwaiter().GetResult();
+            That(s.Status == ProviderStatus.NotConfigured, "no token -> NotConfigured, no network");
+
+            var present = new CopilotProvider(new[] { hosts, apps });
+            That(present.IsDetected(), "any credential file -> detected");
+            File.WriteAllText(hosts, "{\"github.com\":{}}");
+            File.WriteAllText(apps, "{}");
+            UsageSnapshot noToken = present.FetchAsync(CancellationToken.None).GetAwaiter().GetResult();
+            That(noToken.Status == ProviderStatus.NotConfigured,
+                "files without tokens -> NotConfigured");
+        }
+
+        // --- registry and suggestions ---------------------------------------------------
+
+        static void NewProvidersRegistryAndHelp()
+        {
+            var ids = new List<string>();
+            foreach (IUsageProvider p in ProviderRegistry.All) ids.Add(p.Id);
+            That(ids.Count == 9, "nine providers, got " + ids.Count);
+            That(ids[0] == "claude-code" && ids[1] == "codex" && ids[2] == "zai" &&
+                ids[3] == "cursor" && ids[4] == "github-copilot" && ids[5] == "openrouter" &&
+                ids[6] == "antigravity" && ids[7] == "opencode-go" && ids[8] == "muse",
+                "registry order, got " + string.Join(",", ids.ToArray()));
+            That(ProviderRegistry.ExperimentalIds.Length == 3 &&
+                ProviderRegistry.ExperimentalIds[0] == "antigravity" &&
+                ProviderRegistry.ExperimentalIds[1] == "cursor" &&
+                ProviderRegistry.ExperimentalIds[2] == "github-copilot", "experimental ids");
+
+            That(new OpenRouterProvider().Id == "openrouter" &&
+                new OpenRouterProvider().DisplayName == "OpenRouter", "openrouter identity");
+            That(new CursorProvider().Id == "cursor" &&
+                new CursorProvider().DisplayName == "Cursor", "cursor identity");
+            That(new CopilotProvider().Id == "github-copilot" &&
+                new CopilotProvider().DisplayName == "GitHub Copilot", "copilot identity");
+
+            That(KnownTools.HelpText("cursor") == "Experimental: enable under Subscriptions",
+                "cursor help text");
+            That(KnownTools.HelpText("github-copilot") == "Experimental: enable under Subscriptions",
+                "copilot help text");
+            That(KnownTools.HelpText("antigravity") == "Install the agy CLI and sign in to see usage",
+                "antigravity help unchanged");
+            That(KnownTools.HelpText("gemini-cli") == null, "other tools keep no help line");
         }
 
     }

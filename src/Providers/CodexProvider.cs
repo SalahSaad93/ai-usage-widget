@@ -118,6 +118,12 @@ namespace AiUsageWidget.Providers
                 MapWindow(windows, Json.GetObject(rateLimit, "primary_window"));
                 MapWindow(windows, Json.GetObject(rateLimit, "secondary_window"));
             }
+            Dictionary<string, object> review = Json.GetObject(root, "code_review_rate_limit");
+            if (review != null)
+            {
+                MapWindow(windows, Json.GetObject(review, "primary_window"), false, "code review · ");
+                MapWindow(windows, Json.GetObject(review, "secondary_window"), false, "code review · ");
+            }
             var snapshot = new UsageSnapshot();
             snapshot.ProviderId = "codex";
             snapshot.DisplayName = "Codex";
@@ -138,6 +144,9 @@ namespace AiUsageWidget.Providers
 
         // Match by window length, never by primary/secondary position (spec section 8).
         static void MapWindow(List<UsageWindow> into, Dictionary<string, object> w)
+        { MapWindow(into, w, true, ""); }
+
+        static void MapWindow(List<UsageWindow> into, Dictionary<string, object> w, bool primary, string labelPrefix)
         {
             if (w == null) return;
             double? percent = Json.GetDouble(w, "used_percent");
@@ -146,10 +155,23 @@ namespace AiUsageWidget.Providers
             if (!kind.HasValue) return;
             var window = new UsageWindow();
             window.Kind = kind.Value;
+            window.Key = (primary ? "" : "review-") + ((int)Json.GetDouble(w, "limit_window_seconds").Value).ToString(CultureInfo.InvariantCulture);
+            window.DurationSeconds = (int)Json.GetDouble(w, "limit_window_seconds").Value;
+            window.Primary = primary;
+            if (!primary) window.Label = labelPrefix + DefaultLabel(kind.Value);
             window.UsedPercent = percent.Value;
             double? resetAt = Json.GetDouble(w, "reset_at");
             if (resetAt.HasValue) window.ResetsAtUtc = FromEpochSeconds(resetAt.Value);
             into.Add(window);
+        }
+
+        static string DefaultLabel(WindowKind kind)
+        {
+            if (kind == WindowKind.FiveHour) return "5 hours";
+            if (kind == WindowKind.Daily) return "day";
+            if (kind == WindowKind.Weekly) return "week";
+            if (kind == WindowKind.Monthly) return "month";
+            return "usage";
         }
 
         public static WindowKind? KindForSeconds(double? seconds)

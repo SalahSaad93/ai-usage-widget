@@ -12,6 +12,9 @@ namespace AiUsageWidget
     public sealed class WindowVm
     {
         public WindowKind Kind;
+        public string Label;
+        public bool Primary;
+        public string Detail;
         public double UsedPercent;
         public string Resets;   // "2h 10m", or null when the vendor gave no reset time
     }
@@ -44,7 +47,7 @@ namespace AiUsageWidget
         static readonly Color Red = FromHtml("#F85149");
         static readonly Color Accent = FromHtml("#4C8DFF");
 
-        static readonly string[] WindowLabels = { "5 hours", "week", "month" };
+        static readonly WindowKind[] KindOrder = { WindowKind.FiveHour, WindowKind.Daily, WindowKind.Weekly, WindowKind.Monthly, WindowKind.Other };
 
         // Drawn in the body when no provider is shown (spec section 13).
         public const string EmptyStateText = "No AI subscriptions detected on this PC";
@@ -144,7 +147,11 @@ namespace AiUsageWidget
                 {
                     var vm = new WindowVm();
                     vm.Kind = w.Kind;
+                    vm.Label = string.IsNullOrEmpty(w.Label) ? DefaultLabel(w.Kind) : w.Label;
+                    vm.Primary = w.Primary;
                     vm.UsedPercent = w.UsedPercent;
+                    if (w.Used.HasValue && w.Limit.HasValue)
+                        vm.Detail = Number(w.Used.Value) + " / " + Number(w.Limit.Value);
                     if (w.ResetsAtUtc.HasValue)
                     {
                         TimeSpan until = w.ResetsAtUtc.Value - nowUtc;
@@ -155,7 +162,9 @@ namespace AiUsageWidget
                 // five-hour above weekly above monthly, regardless of vendor field order
                 row.Windows.Sort(delegate(WindowVm a, WindowVm b)
                 {
-                    return ColumnOf(a.Kind).CompareTo(ColumnOf(b.Kind));
+                    int primary = b.Primary.CompareTo(a.Primary);
+                    if (primary != 0) return primary;
+                    return KindIndex(a.Kind).CompareTo(KindIndex(b.Kind));
                 });
                 rows.Add(row);
             }
@@ -214,8 +223,7 @@ namespace AiUsageWidget
                 new RectangleF(left, h - FooterHeight, right - left, FooterHeight), false);
         }
 
-        // Width the compact layout needs to show every title whole: the widest name (plus a
-        // plan that fits whole), the three bar columns and the side margins; never below 420.
+        // Width the compact layout needs to show every title whole.
         public float CompactWidthFor(List<RowVm> rows)
         {
             float titleNeeded = 0;
@@ -231,7 +239,7 @@ namespace AiUsageWidget
                         if (w > titleNeeded) titleNeeded = w;
                     }
             }
-            float needed = titleNeeded + S(266) + S(2);   // left margin + 3 columns + right margin
+            float needed = titleNeeded + S(20 + 82 * CompactColumns(rows).Count + 2);   // margins + one 82 px column per kind
             return Math.Max(S(420), needed);
         }
 
@@ -294,11 +302,12 @@ namespace AiUsageWidget
                 bool dim = r.Status == ProviderStatus.Stale;
                 if (r.Windows.Count > 0)
                 {
+                    float labelWidth = DetailedLabelWidth(g, r.Windows);
                     foreach (WindowVm wnd in r.Windows)
                     {
-                        Txt(g, Label(ColumnOf(wnd.Kind)), fSmall, Fade(Dim, dim),
-                            new RectangleF(x0, ly, S(48), S(19)), false);
-                        float bx = x0 + S(48), bw = x1 - S(84) - S(40) - bx;
+                        Txt(g, wnd.Label, fSmall, Fade(Dim, dim),
+                            new RectangleF(x0, ly, labelWidth, S(19)), false);
+                        float bx = x0 + labelWidth, bw = x1 - S(84) - S(40) - bx;
                         if (bw > S(10))
                             Bar(g, wnd.UsedPercent, new RectangleF(bx, ly + S(5.5f), bw, S(8)), dim);
                         Txt(g, PercentText(wnd.UsedPercent), fPct, Fade(ColorFor(wnd.UsedPercent), dim),
@@ -306,6 +315,8 @@ namespace AiUsageWidget
                         if (wnd.Resets != null)
                             Txt(g, "resets " + wnd.Resets, fSmall, Fade(Dim, dim),
                                 new RectangleF(x1 - S(84), ly, S(84), S(19)), true);
+                        else if (wnd.Detail != null)
+                            Txt(g, wnd.Detail, fSmall, Fade(Dim, dim), new RectangleF(x1 - S(84), ly, S(84), S(19)), true);
                         ly += S(19);
                     }
                 }
@@ -320,9 +331,10 @@ namespace AiUsageWidget
 
         void DrawCompact(Graphics g, float y, float width, List<RowVm> rows)
         {
-            float x0 = S(10), x1 = width - S(10), col = S(82), cols = x1 - col * 3;
-            for (int i = 0; i < 3; i++)
-                Txt(g, Label(i), fSmall, Dim, new RectangleF(cols + col * i + S(8), y, col, S(20)), false);
+            List<WindowKind> kinds = CompactColumns(rows);
+            float x0 = S(10), x1 = width - S(10), col = S(82), cols = x1 - col * kinds.Count;
+            for (int i = 0; i < kinds.Count; i++)
+                Txt(g, DefaultLabel(kinds[i]), fSmall, Dim, new RectangleF(cols + col * i + S(8), y, col, S(20)), false);
             y += S(20);
             foreach (RowVm r in rows)
             {
@@ -330,10 +342,10 @@ namespace AiUsageWidget
                 bool dim = r.Status == ProviderStatus.Stale;
                 if (r.Windows.Count > 0)
                 {
-                    for (int i = 0; i < 3; i++)
+                    for (int i = 0; i < kinds.Count; i++)
                     {
                         float cx = cols + col * i + S(8), cw = col - S(8);
-                        WindowVm wnd = WindowInColumn(r.Windows, i);
+                        WindowVm wnd = WindowInColumn(r.Windows, kinds[i]);
                         if (wnd == null)
                         {
                             Txt(g, "—", fSmall, Fade(Dim, dim), new RectangleF(cx, y, cw, S(24)), true);
@@ -347,7 +359,7 @@ namespace AiUsageWidget
                 else
                 {
                     Color c = r.Status == ProviderStatus.AuthRequired ? Yellow : Dim;
-                    Txt(g, r.Msg, fSmall, c, new RectangleF(cols + S(8), y, col * 3 - S(8), S(24)), false);
+                    Txt(g, r.Msg, fSmall, c, new RectangleF(cols + S(8), y, col * kinds.Count - S(8), S(24)), false);
                 }
                 y += S(24);
             }
@@ -395,9 +407,55 @@ namespace AiUsageWidget
             FillRound(g, Fade(ColorFor(v), dim), new RectangleF(r.X, r.Y, w, r.Height), r.Height / 2);
         }
 
-        static string Label(int column)
+        public static string DefaultLabel(WindowKind kind)
         {
-            return WindowLabels[column];
+            if (kind == WindowKind.FiveHour) return "5 hours";
+            if (kind == WindowKind.Daily) return "day";
+            if (kind == WindowKind.Weekly) return "week";
+            if (kind == WindowKind.Monthly) return "month";
+            return "usage";
+        }
+
+        // "7" for whole numbers, "7.5" otherwise.
+        static string Number(double value)
+        {
+            return value == Math.Round(value)
+                ? value.ToString("0", CultureInfo.InvariantCulture)
+                : value.ToString("0.0", CultureInfo.InvariantCulture);
+        }
+
+        static int KindIndex(WindowKind kind)
+        {
+            for (int i = 0; i < KindOrder.Length; i++)
+                if (KindOrder[i] == kind) return i;
+            return KindOrder.Length;
+        }
+
+        // The label column fits the longest label of the row, between 48 and 110 px.
+        float DetailedLabelWidth(Graphics g, List<WindowVm> windows)
+        {
+            float width = S(48);
+            foreach (WindowVm w in windows)
+                width = Math.Max(width,
+                    Math.Min(S(110), g.MeasureString(w.Label, fSmall, 1000, near).Width + S(6)));
+            return width;
+        }
+
+        // Compact columns: the kinds some shown row has a primary window for, in kind order.
+        public static List<WindowKind> CompactColumns(List<RowVm> rows)
+        {
+            var result = new List<WindowKind>();
+            if (rows == null) return result;
+            foreach (WindowKind kind in KindOrder)
+            {
+                if (kind == WindowKind.Other) continue;
+                bool present = false;
+                foreach (RowVm r in rows)
+                    foreach (WindowVm w in r.Windows)
+                        if (w.Primary && w.Kind == kind) present = true;
+                if (present) result.Add(kind);
+            }
+            return result;
         }
 
         static int ColumnOf(WindowKind kind)
@@ -407,10 +465,10 @@ namespace AiUsageWidget
             return 2;
         }
 
-        static WindowVm WindowInColumn(List<WindowVm> windows, int column)
+        static WindowVm WindowInColumn(List<WindowVm> windows, WindowKind kind)
         {
             foreach (WindowVm w in windows)
-                if (ColumnOf(w.Kind) == column) return w;
+                if (w.Primary && w.Kind == kind) return w;
             return null;
         }
 

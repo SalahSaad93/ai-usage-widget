@@ -112,8 +112,22 @@ namespace AiUsageWidget.Providers
         {
             var root = Json.ParseObject(json);
             var windows = new List<UsageWindow>();
-            MapWindow(windows, WindowKind.FiveHour, Json.GetObject(root, "five_hour"));
-            MapWindow(windows, WindowKind.Weekly, Json.GetObject(root, "seven_day"));
+            MapWindow(windows, WindowKind.FiveHour, "5h", 18000, Json.GetObject(root, "five_hour"));
+            MapWindow(windows, WindowKind.Weekly, "7d", 604800, Json.GetObject(root, "seven_day"));
+            MapExtraWindow(windows, Json.GetObject(root, "seven_day_opus"), "7d-opus", "week · Opus");
+            MapExtraWindow(windows, Json.GetObject(root, "seven_day_sonnet"), "7d-sonnet", "week · Sonnet");
+            Dictionary<string, object> extra = Json.GetObject(root, "extra_usage");
+            if (extra != null && Json.GetBool(extra, "is_enabled", false))
+            {
+                double? extraPercent = Json.GetDouble(extra, "utilization");
+                if (extraPercent.HasValue)
+                {
+                    var ew = new UsageWindow(); ew.Kind = WindowKind.Other; ew.Key = "extra";
+                    ew.Label = "extra usage"; ew.Primary = false; ew.UsedPercent = extraPercent.Value;
+                    ew.Used = Json.GetDouble(extra, "used_credits"); ew.Limit = Json.GetDouble(extra, "monthly_limit");
+                    ew.Unit = "credits"; windows.Add(ew);
+                }
+            }
             var snapshot = new UsageSnapshot();
             snapshot.ProviderId = "claude-code";
             snapshot.DisplayName = "Claude Code";
@@ -132,7 +146,7 @@ namespace AiUsageWidget.Providers
         }
 
         // A null block is absent; a block without a utilization is too.
-        static void MapWindow(List<UsageWindow> into, WindowKind kind,
+        static void MapWindow(List<UsageWindow> into, WindowKind kind, string key, int duration,
             Dictionary<string, object> block)
         {
             if (block == null) return;
@@ -140,9 +154,18 @@ namespace AiUsageWidget.Providers
             if (!percent.HasValue) return;
             var window = new UsageWindow();
             window.Kind = kind;
+            window.Key = key; window.DurationSeconds = duration;
             window.UsedPercent = percent.Value;
             window.ResetsAtUtc = ParseInstant(Json.GetStr(block, "resets_at"));
             into.Add(window);
+        }
+
+        static void MapExtraWindow(List<UsageWindow> into, Dictionary<string, object> block,
+            string key, string label)
+        {
+            if (block == null || !Json.GetDouble(block, "utilization").HasValue) return;
+            MapWindow(into, WindowKind.Weekly, key, 604800, block);
+            UsageWindow w = into[into.Count - 1]; w.Primary = false; w.Label = label;
         }
 
         // "resets_at" is ISO 8601 with offset; unparseable -> no reset time.

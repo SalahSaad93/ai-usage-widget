@@ -67,6 +67,10 @@ namespace AiUsageWidget
             Check(lines, "errors_describe", ErrorsDescribe);
             Check(lines, "offline_does_not_back_off", OfflineDoesNotBackOff);
             Check(lines, "auth_required_keeps_last_good", AuthRequiredKeepsLastGood);
+            Check(lines, "usage_window_extensions", UsageWindowExtensions);
+            Check(lines, "claude_extra_windows", ClaudeExtraWindows);
+            Check(lines, "codex_review_windows", CodexReviewWindows);
+            Check(lines, "painter_extended_rows_and_columns", PainterExtendedRowsAndColumns);
 
             string[] all = lines.ToArray();
             if (!string.IsNullOrEmpty(outPath)) File.WriteAllLines(outPath, all, new UTF8Encoding(false)); // no BOM: the log must start with PASS
@@ -177,6 +181,7 @@ namespace AiUsageWidget
             full.Message = "";
             var w = new UsageWindow();
             w.Kind = WindowKind.Weekly;
+            w.Key = "7d"; w.Label = "week · Opus"; w.Primary = false; w.DurationSeconds = 604800; w.Unit = "requests";
             w.UsedPercent = 41.5;
             w.Used = 123.25;
             w.Limit = 1000;
@@ -207,6 +212,7 @@ namespace AiUsageWidget
             That(a.Windows[0].Limit.HasValue && a.Windows[0].Limit.Value == 1000, "limit survives");
             That(a.Windows[0].ResetsAtUtc.HasValue && a.Windows[0].ResetsAtUtc.Value == w.ResetsAtUtc.Value,
                 "reset time survives");
+            That(a.Windows[0].Key == w.Key && a.Windows[0].Label == w.Label && !a.Windows[0].Primary && a.Windows[0].DurationSeconds == 604800 && a.Windows[0].Unit == "requests", "new metadata survives");
             UsageSnapshot b = back[1];
             That(b.ProviderId == "claude-code" && b.Status == ProviderStatus.NotConfigured
                 && b.Windows.Count == 0, "minimal snapshot survives");
@@ -744,6 +750,12 @@ namespace AiUsageWidget
                 var rows = new List<RowVm>();
                 rows.Add(new RowVm { Name = "Claude Code", Plan = "Max 20x Team Plan" });
                 rows.Add(new RowVm { Name = "Codex" });
+                rows[0].Windows.Add(new WindowVm { Kind = WindowKind.FiveHour, Primary = true });
+                rows[0].Windows.Add(new WindowVm { Kind = WindowKind.Weekly, Primary = true });
+                rows[0].Windows.Add(new WindowVm { Kind = WindowKind.Monthly, Primary = true });
+                rows[1].Windows.Add(new WindowVm { Kind = WindowKind.FiveHour, Primary = true });
+                rows[1].Windows.Add(new WindowVm { Kind = WindowKind.Weekly, Primary = true });
+                rows[1].Windows.Add(new WindowVm { Kind = WindowKind.Monthly, Primary = true });
                 float wide = painter.CompactWidthFor(rows);
                 That(wide > painter.S(420),
                     "long name + plan needs more than the 420 minimum, got " + wide);
@@ -1595,6 +1607,57 @@ namespace AiUsageWidget
             That(svc2.Snapshots[0].Status == ProviderStatus.AuthRequired,
                 "no previous windows -> AuthRequired replaces, as today");
             That(File.Exists(cachePath2), "AuthRequired is persisted as today");
+        }
+
+        static void UsageWindowExtensions()
+        {
+            UsageWindow w = new UsageWindow();
+            That(w.Primary && w.Key == null && w.Label == null && !w.DurationSeconds.HasValue && w.Unit == null, "model defaults");
+            That(UsageWindow.KindForDuration(18000) == WindowKind.FiveHour, "5h");
+            That(UsageWindow.KindForDuration(86400) == WindowKind.Daily, "day");
+            That(UsageWindow.KindForDuration(604800) == WindowKind.Weekly, "week");
+            That(UsageWindow.KindForDuration(2419200) == WindowKind.Monthly, "28d");
+            That(UsageWindow.KindForDuration(3600) == WindowKind.Other, "other");
+            string path = Path.Combine(AppPaths.DataDir, "cache-old-format.json");
+            File.WriteAllText(path, "{\"snapshots\":[{\"providerId\":\"codex\",\"windows\":[{\"kind\":\"Weekly\",\"usedPercent\":10}]}]}");
+            UsageWindow old = SnapshotCache.Load(path)[0].Windows[0];
+            That(old.Primary && old.Key == null && old.Label == null && !old.DurationSeconds.HasValue && old.Unit == null, "old cache defaults");
+        }
+
+        static void ClaudeExtraWindows()
+        {
+            string json = "{\"five_hour\":null,\"seven_day\":null,\"seven_day_opus\":{\"utilization\":25},\"seven_day_sonnet\":{\"utilization\":35},\"extra_usage\":{\"is_enabled\":true,\"utilization\":12,\"used_credits\":7,\"monthly_limit\":100}}";
+            UsageSnapshot s = ClaudeCodeProvider.Parse(json, "");
+            That(s.Windows.Count == 3 && !s.Windows[0].Primary, "supplemental blocks parsed");
+            That(s.Windows[0].Label == "week · Opus" && s.Windows[1].Label == "week · Sonnet", "weekly labels");
+            UsageWindow extra = s.Windows[2]; That(extra.Kind == WindowKind.Other && extra.Unit == "credits" && extra.Used == 7 && extra.Limit == 100 && !extra.ResetsAtUtc.HasValue, "extra credits");
+        }
+
+        static void CodexReviewWindows()
+        {
+            string json = "{\"rate_limit\":{\"primary_window\":{\"used_percent\":10,\"limit_window_seconds\":604800}},\"code_review_rate_limit\":{\"primary_window\":{\"used_percent\":20,\"limit_window_seconds\":18000},\"secondary_window\":{\"used_percent\":30,\"limit_window_seconds\":604800}}}";
+            UsageSnapshot s = CodexProvider.Parse(json);
+            That(s.Windows.Count == 3 && !s.Windows[1].Primary && s.Windows[1].Label == "code review · 5 hours" && s.Windows[2].Label == "code review · week", "review windows mapped");
+        }
+
+        static void PainterExtendedRowsAndColumns()
+        {
+            var sn = SnapFor("codex", "Codex");
+            UsageWindow e = new UsageWindow { Kind = WindowKind.Weekly, Label = "week · Opus", Primary = false, Used = 7, Limit = 100, UsedPercent = 7 };
+            UsageWindow p = new UsageWindow { Kind = WindowKind.Weekly, UsedPercent = 1 };
+            sn.Windows.Add(e); sn.Windows.Add(p);
+            List<RowVm> rows = Painter.BuildRows(new List<UsageSnapshot> { sn }, DateTime.UtcNow, new List<string> { "codex" });
+            That(rows[0].Windows[0].Primary && rows[0].Windows[1].Detail == "7 / 100", "primary ordering and detail");
+            using (Painter painter = new Painter(1f))
+            {
+                var three = new List<RowVm> { new RowVm() };
+                three[0].Windows.Add(new WindowVm { Kind = WindowKind.FiveHour, Primary = true }); three[0].Windows.Add(new WindowVm { Kind = WindowKind.Weekly, Primary = true }); three[0].Windows.Add(new WindowVm { Kind = WindowKind.Monthly, Primary = true });
+                That(painter.CompactWidthFor(three) == painter.S(420), "today columns minimum");
+                var weekly = new List<RowVm> { new RowVm() }; weekly[0].Windows.Add(new WindowVm { Kind = WindowKind.Weekly, Primary = true });
+                That(painter.CompactWidthFor(weekly) == painter.S(420), "weekly column");
+                var daily = new List<RowVm> { new RowVm() }; daily[0].Windows.Add(new WindowVm { Kind = WindowKind.Daily, Primary = true });
+                That(painter.CompactWidthFor(daily) == painter.S(420), "daily column");
+            }
         }
 
     }

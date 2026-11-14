@@ -190,6 +190,8 @@ namespace AiUsageWidget.Providers
                 {
                     var window = new UsageWindow();
                     window.Kind = kind.Value;
+                    window.Key = kind.Value == WindowKind.FiveHour ? "5h" : (kind.Value == WindowKind.Weekly ? "7d" : "30d");
+                    window.DurationSeconds = kind.Value == WindowKind.FiveHour ? 18000 : (kind.Value == WindowKind.Weekly ? 604800 : 2592000);
                     double used = (1.0 - fraction.Value) * 100.0;
                     if (used < 0) used = 0;
                     if (used > 100) used = 100;

@@ -6,8 +6,10 @@ namespace AiUsageWidget.Core
     public enum WindowKind
     {
         FiveHour,
+        Daily,
         Weekly,
-        Monthly
+        Monthly,
+        Other
     }
 
     public enum ProviderStatus
@@ -21,11 +23,27 @@ namespace AiUsageWidget.Core
 
     public sealed class UsageWindow
     {
+        public string Key;
+        public string Label;
+        public bool Primary = true;
+        public int? DurationSeconds;
+        public string Unit;
         public WindowKind Kind;
         public double UsedPercent;        // 0..100, always set
         public double? Used;              // absolute, only when the vendor reports it
         public double? Limit;
         public DateTime? ResetsAtUtc;
+
+        public static WindowKind KindForDuration(double? seconds)
+        {
+            if (!seconds.HasValue) return WindowKind.Other;
+            double value = seconds.Value;
+            if (Math.Abs(value - 18000) <= 1800) return WindowKind.FiveHour;
+            if (Math.Abs(value - 86400) <= 8640) return WindowKind.Daily;
+            if (Math.Abs(value - 604800) <= 60480) return WindowKind.Weekly;
+            if (value >= 2419200) return WindowKind.Monthly;
+            return WindowKind.Other;
+        }
     }
 
     public sealed class UsageSnapshot

@@ -183,6 +183,8 @@ namespace AiUsageWidget.Providers
 
             var window = new UsageWindow();
             window.Kind = kind;
+            window.Key = kind == WindowKind.FiveHour ? "5h" : "7d";
+            window.DurationSeconds = kind == WindowKind.FiveHour ? 18000 : 604800;
             window.UsedPercent = percent.Value;
             double? reset = Json.GetDouble(block, "resetsAtMs");
             if (!reset.HasValue) reset = fallbackResetMs;

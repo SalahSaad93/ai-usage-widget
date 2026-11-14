@@ -67,6 +67,11 @@ namespace AiUsageWidget.Core
             {
                 var wd = new Dictionary<string, object>();
                 wd["kind"] = w.Kind.ToString();
+                wd["key"] = w.Key;
+                wd["label"] = w.Label;
+                wd["primary"] = w.Primary;
+                wd["durationSeconds"] = w.DurationSeconds.HasValue ? (object)w.DurationSeconds.Value : null;
+                wd["unit"] = w.Unit;
                 wd["usedPercent"] = w.UsedPercent;
                 wd["used"] = w.Used.HasValue ? (object)w.Used.Value : null;
                 wd["limit"] = w.Limit.HasValue ? (object)w.Limit.Value : null;
@@ -104,6 +109,12 @@ namespace AiUsageWidget.Core
                     if (!percent.HasValue) continue;
                     var w = new UsageWindow();
                     w.Kind = kind;
+                    w.Key = Json.GetStr(wd, "key");
+                    w.Label = Json.GetStr(wd, "label");
+                    w.Primary = !wd.ContainsKey("primary") || Json.GetBool(wd, "primary", true);
+                    double? duration = Json.GetDouble(wd, "durationSeconds");
+                    if (duration.HasValue) w.DurationSeconds = (int)duration.Value;
+                    w.Unit = Json.GetStr(wd, "unit");
                     w.UsedPercent = percent.Value;
                     w.Used = Json.GetDouble(wd, "used");
                     w.Limit = Json.GetDouble(wd, "limit");

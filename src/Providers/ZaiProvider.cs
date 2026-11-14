@@ -192,6 +192,9 @@ namespace AiUsageWidget.Providers
 
             var window = new UsageWindow();
             window.Kind = kind.Value;
+            if (kind.Value == WindowKind.FiveHour) { window.Key = "5h"; window.DurationSeconds = 18000; }
+            else if (kind.Value == WindowKind.Weekly) { window.Key = "7d"; window.DurationSeconds = 604800; }
+            else { window.Key = "30d-tools"; window.DurationSeconds = 2592000; window.Label = "web tools"; window.Unit = "requests"; }
             window.UsedPercent = percent.Value;
             if (kind.Value == WindowKind.Monthly)
             {

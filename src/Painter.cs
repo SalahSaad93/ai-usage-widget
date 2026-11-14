@@ -8,6 +8,33 @@ using AiUsageWidget.Core;
 
 namespace AiUsageWidget
 {
+    public enum HitKind
+    {
+        None,
+        MenuButton,
+        RefreshButton,
+        CloseButton,
+        DetailedChip,
+        CompactChip,
+        RowTitle,
+        UsageWindow
+    }
+
+    // What a point on the widget lands on; the tooltip and hover code read it. Row and
+    // Window are -1 when the hit is not on a row, and Window is -1 unless the hit is a
+    // usage line.
+    public struct HitInfo
+    {
+        public HitKind Kind;
+        public int Row;
+        public int Window;
+
+        public bool Equals(HitInfo other)
+        {
+            return Kind == other.Kind && Row == other.Row && Window == other.Window;
+        }
+    }
+
     // What the painter draws; UsageSnapshot stays free of UI concerns.
     public sealed class WindowVm
     {
@@ -15,8 +42,10 @@ namespace AiUsageWidget
         public string Label;
         public bool Primary;
         public string Detail;
+        public string Unit;
         public double UsedPercent;
         public string Resets;   // "2h 10m", or null when the vendor gave no reset time
+        public DateTime? ResetsAtUtc;   // the absolute reset time, for the tooltip
     }
 
     public sealed class RowVm
@@ -25,6 +54,7 @@ namespace AiUsageWidget
         public string Plan;
         public ProviderStatus Status;
         public string Msg;      // auth / not-configured / error text, or the stale tag
+        public DateTime FetchedAtUtc;   // last good fetch, for the title tooltip's age
         public List<WindowVm> Windows;
 
         public RowVm()
@@ -34,31 +64,33 @@ namespace AiUsageWidget
     }
 
     // All drawing. Reproduces prototype/PrototypeWinForms.cs (the approved look), minus the
-    // PROTOTYPE footer and layout chips; layout is chosen from the tray menu.
+    // PROTOTYPE footer and layout chips; layout is chosen from the menu.
     public sealed class Painter : IDisposable
     {
-        static readonly Color Bg = FromHtml("#1E1F22");
-        static readonly Color Card = FromHtml("#26282C");
-        static readonly Color Line = FromHtml("#3A3D44");
-        static readonly Color Fg = FromHtml("#E6E6E6");
-        static readonly Color Dim = FromHtml("#8B8F98");
-        static readonly Color Green = FromHtml("#3FB950");
-        static readonly Color Yellow = FromHtml("#D29922");
-        static readonly Color Red = FromHtml("#F85149");
-        static readonly Color Accent = FromHtml("#4C8DFF");
-
         static readonly WindowKind[] KindOrder = { WindowKind.FiveHour, WindowKind.Daily, WindowKind.Weekly, WindowKind.Monthly, WindowKind.Other };
 
         // Drawn in the body when no provider is shown (spec section 13).
         public const string EmptyStateText = "No AI subscriptions detected on this PC";
 
+        readonly Theme theme;
+        readonly int warnPercent;
+        readonly int criticalPercent;
         readonly float s;
         readonly Font fName, fPlan, fSmall, fPct;
         readonly StringFormat near, far;
 
+        // Dark at 50/70: what the widget has always drawn; the self-test uses this shape.
         public Painter(float dpiScale)
+            : this(dpiScale, Theme.Dark, 50, 70)
+        {
+        }
+
+        public Painter(float dpiScale, Theme palette, int warn, int critical)
         {
             s = dpiScale;
+            theme = palette;
+            warnPercent = warn;
+            criticalPercent = critical;
             fName = new Font("Segoe UI Semibold", S(13), GraphicsUnit.Pixel);
             fPlan = new Font("Segoe UI", S(11), GraphicsUnit.Pixel);
             fSmall = new Font("Segoe UI", S(10.5f), GraphicsUnit.Pixel);
@@ -73,27 +105,49 @@ namespace AiUsageWidget
             far.Alignment = StringAlignment.Far;
         }
 
-        public static Color Background { get { return Bg; } }
+        // Windows 11 rounds the corners and draws its own edge; Windows 10 keeps the 1 px frame.
+        public bool DrawBorder = true;
+
+        public Color Background { get { return theme.Background; } }
 
         public float S(float v)
         {
             return v * s;
         }
 
-        static Color FromHtml(string hex)
-        {
-            return ColorTranslator.FromHtml(hex);
-        }
-
-        // One colour rule for everything: < 50 green, 50..70 yellow (inclusive), > 70 red.
+        // One colour rule for everything at the built-in 50/70 thresholds; kept for the
+        // self-test. The widget draws with ColorAt and its settings thresholds.
         public static Color ColorFor(double percent)
         {
-            return percent < 50 ? Green : (percent <= 70 ? Yellow : Red);
+            return percent < 50 ? Theme.Dark.Green
+                : (percent <= 70 ? Theme.Dark.Yellow : Theme.Dark.Red);
+        }
+
+        // Below warn green, warn..critical inclusive yellow, above critical red.
+        public Color ColorAt(double percent)
+        {
+            return percent < warnPercent ? theme.Green
+                : (percent <= criticalPercent ? theme.Yellow : theme.Red);
         }
 
         static Color Fade(Color c, bool dim)
         {
             return dim ? Color.FromArgb(115, c) : c;
+        }
+
+        // Hover fill: a step toward the text colour — lighter on the dark theme, a shade
+        // darker on the light one, so the fill reads on both.
+        Color HoverFill(Color fill)
+        {
+            return Blend(fill, theme.Text, 0.10f);
+        }
+
+        static Color Blend(Color a, Color b, float t)
+        {
+            return Color.FromArgb(
+                a.R + (int)((b.R - a.R) * t),
+                a.G + (int)((b.G - a.G) * t),
+                a.B + (int)((b.B - a.B) * t));
         }
 
         static string PercentText(double v)
@@ -133,6 +187,7 @@ namespace AiUsageWidget
                 row.Name = string.IsNullOrEmpty(sn.DisplayName) ? sn.ProviderId : sn.DisplayName;
                 row.Plan = sn.PlanName;
                 row.Status = sn.Status;
+                row.FetchedAtUtc = sn.FetchedAtUtc;
                 if (sn.Status == ProviderStatus.Stale)
                 {
                     row.Msg = "stale " + Duration(nowUtc - sn.FetchedAtUtc);
@@ -150,10 +205,12 @@ namespace AiUsageWidget
                     vm.Label = string.IsNullOrEmpty(w.Label) ? DefaultLabel(w.Kind) : w.Label;
                     vm.Primary = w.Primary;
                     vm.UsedPercent = w.UsedPercent;
+                    vm.Unit = w.Unit;
                     if (w.Used.HasValue && w.Limit.HasValue)
                         vm.Detail = Number(w.Used.Value) + " / " + Number(w.Limit.Value);
                     if (w.ResetsAtUtc.HasValue)
                     {
+                        vm.ResetsAtUtc = w.ResetsAtUtc;
                         TimeSpan until = w.ResetsAtUtc.Value - nowUtc;
                         vm.Resets = until.TotalSeconds <= 0 ? "now" : Duration(until);
                     }
@@ -199,6 +256,15 @@ namespace AiUsageWidget
             get { return S(30); }
         }
 
+        // The scroll offset drawing and hit-testing agree on: never below the content.
+        public int ClampedScroll(float winWidth, float winHeight, int mode, int scroll,
+            List<RowVm> rows)
+        {
+            float bodyHeight = winHeight - HeaderHeight - FooterHeight;
+            float contentH = ContentHeight(mode, rows);
+            return (int)Math.Max(0, Math.Min(scroll, contentH - bodyHeight));
+        }
+
         // Layout switch in the footer, as in the approved prototype.
         public RectangleF DetailedRect(float w, float h)
         {
@@ -219,7 +285,7 @@ namespace AiUsageWidget
             float right = DetailedRect(w, h).Left - S(8);
             if (right - left < S(20)) return;
             if (g.MeasureString(text, fSmall, 1000, near).Width > right - left) return;
-            Txt(g, text, fSmall, Dim,
+            Txt(g, text, fSmall, theme.DimText,
                 new RectangleF(left, h - FooterHeight, right - left, FooterHeight), false);
         }
 
@@ -243,6 +309,13 @@ namespace AiUsageWidget
             return Math.Max(S(420), needed);
         }
 
+        // --- header / footer geometry (shared by drawing, hit-testing and clicks) -------
+
+        public RectangleF MenuRect(float w)
+        {
+            return new RectangleF(w - S(80), S(5), S(22), S(20));
+        }
+
         public RectangleF RefreshRect(float w)
         {
             return new RectangleF(w - S(54), S(5), S(22), S(20));
@@ -253,145 +326,204 @@ namespace AiUsageWidget
             return new RectangleF(w - S(28), S(5), S(22), S(20));
         }
 
+        // --- detailed-mode geometry (shared by drawing and hit-testing) ------------------
+
+        public float DetailedBodyPad()
+        {
+            return S(2);
+        }
+
+        public RectangleF DetailedCardRect(RowVm r, float y, float width)
+        {
+            return new RectangleF(S(8), y, width - S(16), RowHeight(0, r) - S(6));
+        }
+
+        public RectangleF DetailedTitleBox(RectangleF card)
+        {
+            return new RectangleF(card.X + S(10), card.Y + S(8), card.Width - S(20), S(18));
+        }
+
+        // One usage line inside a card; message rows draw their text in line 0's box.
+        public RectangleF DetailedLineBox(RectangleF card, int line)
+        {
+            return new RectangleF(card.X + S(10), card.Y + S(8) + S(18) + S(19) * line,
+                card.Width - S(20), S(19));
+        }
+
+        // --- compact-mode geometry (shared by drawing and hit-testing) -------------------
+
+        public float CompactLabelBand()
+        {
+            return S(20);
+        }
+
+        public float CompactRowPitch()
+        {
+            return S(24);
+        }
+
+        public float CompactColsLeft(float width, List<RowVm> rows)
+        {
+            return width - S(10) - S(82) * CompactColumns(rows).Count;
+        }
+
+        public float CompactColumnX(float cols, int column)
+        {
+            return cols + S(82) * column + S(8);
+        }
+
+        public RectangleF CompactTitleBox(float cols, float y)
+        {
+            return new RectangleF(S(10), y, cols - S(10), S(24));
+        }
+
+        public RectangleF CompactCellBox(float cols, int column, float y)
+        {
+            return new RectangleF(CompactColumnX(cols, column), y, S(82) - S(8), S(24));
+        }
+
         public void Draw(Graphics g, float winWidth, float winHeight, int mode, int scroll,
-            List<RowVm> rows, string headerNote, string footerNote)
+            List<RowVm> rows, string headerNote, string footerNote, HitInfo hover)
         {
             g.SmoothingMode = SmoothingMode.AntiAlias;
             g.TextRenderingHint = TextRenderingHint.ClearTypeGridFit;
             float header = HeaderHeight;
             var body = new RectangleF(0, header, winWidth, winHeight - header - FooterHeight);
-            float contentH = ContentHeight(mode, rows);
-            int clamped = (int)Math.Max(0, Math.Min(scroll, contentH - body.Height));
+            int clamped = ClampedScroll(winWidth, winHeight, mode, scroll, rows);
             g.SetClip(body);
             if (mode == 0) DrawDetailed(g, header - clamped, winWidth, rows);
             else DrawCompact(g, header - clamped, winWidth, rows);
             g.ResetClip();
 
             if (rows == null || rows.Count == 0)
-                Txt(g, EmptyStateText, fSmall, Dim,
+                Txt(g, EmptyStateText, fSmall, theme.DimText,
                     new RectangleF(S(10), header + S(10), winWidth - S(20), S(19)), false);
 
-            DrawHeader(g, winWidth, headerNote);
+            DrawHeader(g, winWidth, headerNote, hover);
             DrawFooterNote(g, winWidth, winHeight, footerNote);
-            Chip(g, "Detailed", DetailedRect(winWidth, winHeight), mode == 0);
-            Chip(g, "Compact", CompactRect(winWidth, winHeight), mode == 1);
-            using (var pen = new Pen(Line)) g.DrawRectangle(pen, 0, 0, winWidth - 1, winHeight - 1);
+            Chip(g, "Detailed", DetailedRect(winWidth, winHeight), mode == 0,
+                hover.Kind == HitKind.DetailedChip);
+            Chip(g, "Compact", CompactRect(winWidth, winHeight), mode == 1,
+                hover.Kind == HitKind.CompactChip);
+            if (DrawBorder)
+                using (var pen = new Pen(theme.Line)) g.DrawRectangle(pen, 0, 0, winWidth - 1, winHeight - 1);
         }
 
-        void DrawHeader(Graphics g, float w, string headerNote)
+        void DrawHeader(Graphics g, float w, string headerNote, HitInfo hover)
         {
             float header = HeaderHeight;
-            Txt(g, "AI Usage", fName, Fg, new RectangleF(S(10), 0, S(70), header), false);
+            Txt(g, "AI Usage", fName, theme.Text, new RectangleF(S(10), 0, S(70), header), false);
             float tx = S(10) + g.MeasureString("AI Usage", fName, 1000, near).Width + S(8);
-            Txt(g, headerNote, fSmall, Dim, new RectangleF(tx, S(1), w - tx - S(60), header), false);
-            Chip(g, "⟳", RefreshRect(w));
-            Chip(g, "✕", CloseRect(w));
+            Txt(g, headerNote, fSmall, theme.DimText, new RectangleF(tx, S(1), w - tx - S(88), header), false);
+            Chip(g, "⋯", MenuRect(w), false, hover.Kind == HitKind.MenuButton);
+            Chip(g, "⟳", RefreshRect(w), false, hover.Kind == HitKind.RefreshButton);
+            Chip(g, "✕", CloseRect(w), false, hover.Kind == HitKind.CloseButton);
         }
 
         void DrawDetailed(Graphics g, float y, float width, List<RowVm> rows)
         {
-            y += S(2);
+            y += DetailedBodyPad();
             foreach (RowVm r in rows)
             {
-                float h = RowHeight(0, r) - S(6);
-                var card = new RectangleF(S(8), y, width - S(16), h);
-                FillRound(g, Card, card, S(6));
-                float x0 = card.X + S(10), x1 = card.Right - S(10), ly = y + S(8);
-                Title(g, r, new RectangleF(x0, ly, x1 - x0, S(18)));
-                ly += S(18);
+                RectangleF card = DetailedCardRect(r, y, width);
+                FillRound(g, theme.Card, card, S(6));
+                RectangleF title = DetailedTitleBox(card);
+                Title(g, r, title);
                 bool dim = r.Status == ProviderStatus.Stale;
                 if (r.Windows.Count > 0)
                 {
                     float labelWidth = DetailedLabelWidth(g, r.Windows);
-                    foreach (WindowVm wnd in r.Windows)
+                    for (int j = 0; j < r.Windows.Count; j++)
                     {
-                        Txt(g, wnd.Label, fSmall, Fade(Dim, dim),
-                            new RectangleF(x0, ly, labelWidth, S(19)), false);
-                        float bx = x0 + labelWidth, bw = x1 - S(84) - S(40) - bx;
+                        WindowVm wnd = r.Windows[j];
+                        RectangleF ln = DetailedLineBox(card, j);
+                        Txt(g, wnd.Label, fSmall, Fade(theme.DimText, dim),
+                            new RectangleF(ln.X, ln.Y, labelWidth, ln.Height), false);
+                        float bx = ln.X + labelWidth, bw = ln.Right - S(84) - S(40) - bx;
                         if (bw > S(10))
-                            Bar(g, wnd.UsedPercent, new RectangleF(bx, ly + S(5.5f), bw, S(8)), dim);
-                        Txt(g, PercentText(wnd.UsedPercent), fPct, Fade(ColorFor(wnd.UsedPercent), dim),
-                            new RectangleF(x1 - S(84) - S(40), ly, S(40), S(19)), true);
+                            Bar(g, wnd.UsedPercent, new RectangleF(bx, ln.Y + S(5.5f), bw, S(8)), dim);
+                        Txt(g, PercentText(wnd.UsedPercent), fPct, Fade(ColorAt(wnd.UsedPercent), dim),
+                            new RectangleF(ln.Right - S(84) - S(40), ln.Y, S(40), ln.Height), true);
                         if (wnd.Resets != null)
-                            Txt(g, "resets " + wnd.Resets, fSmall, Fade(Dim, dim),
-                                new RectangleF(x1 - S(84), ly, S(84), S(19)), true);
+                            Txt(g, "resets " + wnd.Resets, fSmall, Fade(theme.DimText, dim),
+                                new RectangleF(ln.Right - S(84), ln.Y, S(84), ln.Height), true);
                         else if (wnd.Detail != null)
-                            Txt(g, wnd.Detail, fSmall, Fade(Dim, dim), new RectangleF(x1 - S(84), ly, S(84), S(19)), true);
-                        ly += S(19);
+                            Txt(g, wnd.Detail, fSmall, Fade(theme.DimText, dim),
+                                new RectangleF(ln.Right - S(84), ln.Y, S(84), ln.Height), true);
                     }
                 }
                 else
                 {
-                    Color c = r.Status == ProviderStatus.AuthRequired ? Yellow : Dim;
-                    Txt(g, r.Msg, fSmall, c, new RectangleF(x0, ly, x1 - x0, S(19)), false);
+                    Color c = r.Status == ProviderStatus.AuthRequired ? theme.Yellow : theme.DimText;
+                    RectangleF ln = DetailedLineBox(card, 0);
+                    Txt(g, r.Msg, fSmall, c, new RectangleF(ln.X, ln.Y, ln.Width, ln.Height), false);
                 }
-                y += h + S(6);
+                y += RowHeight(0, r);
             }
         }
 
         void DrawCompact(Graphics g, float y, float width, List<RowVm> rows)
         {
             List<WindowKind> kinds = CompactColumns(rows);
-            float x0 = S(10), x1 = width - S(10), col = S(82), cols = x1 - col * kinds.Count;
+            float cols = CompactColsLeft(width, rows);
             for (int i = 0; i < kinds.Count; i++)
-                Txt(g, DefaultLabel(kinds[i]), fSmall, Dim, new RectangleF(cols + col * i + S(8), y, col, S(20)), false);
-            y += S(20);
+                Txt(g, DefaultLabel(kinds[i]), fSmall, theme.DimText,
+                    new RectangleF(CompactColumnX(cols, i), y, S(82), CompactLabelBand()), false);
+            y += CompactLabelBand();
             foreach (RowVm r in rows)
             {
-                Title(g, r, new RectangleF(x0, y, cols - x0, S(24)));
+                Title(g, r, CompactTitleBox(cols, y));
                 bool dim = r.Status == ProviderStatus.Stale;
                 if (r.Windows.Count > 0)
                 {
                     for (int i = 0; i < kinds.Count; i++)
                     {
-                        float cx = cols + col * i + S(8), cw = col - S(8);
+                        RectangleF cell = CompactCellBox(cols, i, y);
                         WindowVm wnd = WindowInColumn(r.Windows, kinds[i]);
                         if (wnd == null)
                         {
-                            Txt(g, "—", fSmall, Fade(Dim, dim), new RectangleF(cx, y, cw, S(24)), true);
+                            Txt(g, "—", fSmall, Fade(theme.DimText, dim), cell, true);
                             continue;
                         }
-                        Bar(g, wnd.UsedPercent, new RectangleF(cx, y + S(9.5f), cw - S(34), S(5)), dim);
-                        Txt(g, PercentText(wnd.UsedPercent), fSmall, Fade(ColorFor(wnd.UsedPercent), dim),
-                            new RectangleF(cx + cw - S(34), y, S(34), S(24)), true);
+                        Bar(g, wnd.UsedPercent, new RectangleF(cell.X, y + S(9.5f), cell.Width - S(34), S(5)), dim);
+                        Txt(g, PercentText(wnd.UsedPercent), fSmall, Fade(ColorAt(wnd.UsedPercent), dim),
+                            new RectangleF(cell.Right - S(34), y, S(34), S(24)), true);
                     }
                 }
                 else
                 {
-                    Color c = r.Status == ProviderStatus.AuthRequired ? Yellow : Dim;
-                    Txt(g, r.Msg, fSmall, c, new RectangleF(cols + S(8), y, col * kinds.Count - S(8), S(24)), false);
+                    Color c = r.Status == ProviderStatus.AuthRequired ? theme.Yellow : theme.DimText;
+                    Txt(g, r.Msg, fSmall, c, new RectangleF(cols + S(8), y,
+                        S(82) * kinds.Count - S(8), S(24)), false);
                 }
-                y += S(24);
+                y += CompactRowPitch();
             }
         }
 
         void Title(Graphics g, RowVm r, RectangleF box)
         {
             float x = box.X;
-            Txt(g, r.Name, fName, r.Status == ProviderStatus.NotConfigured ? Dim : Fg, box, false);
+            Txt(g, r.Name, fName, r.Status == ProviderStatus.NotConfigured ? theme.DimText : theme.Text, box, false);
             x += g.MeasureString(r.Name, fName, 1000, near).Width + S(6);
             if (!string.IsNullOrEmpty(r.Plan))
             {
                 float planW = g.MeasureString(r.Plan, fPlan, 1000, near).Width;
                 if (x + planW <= box.Right)   // the plan shows whole or not at all, never clipped
                 {
-                    Txt(g, r.Plan, fPlan, Dim, new RectangleF(x, box.Y + S(1), planW, box.Height), false);
+                    Txt(g, r.Plan, fPlan, theme.DimText, new RectangleF(x, box.Y + S(1), planW, box.Height), false);
                     x += planW + S(6);
                 }
             }
             if (r.Status == ProviderStatus.Stale && x < box.Right)
-                Txt(g, r.Msg, fSmall, Yellow, new RectangleF(x, box.Y + S(1), box.Right - x, box.Height), false);
+                Txt(g, r.Msg, fSmall, theme.Yellow, new RectangleF(x, box.Y + S(1), box.Right - x, box.Height), false);
         }
 
-        void Chip(Graphics g, string glyph, RectangleF r)
+        void Chip(Graphics g, string glyph, RectangleF r, bool active, bool hovered)
         {
-            Chip(g, glyph, r, false);
-        }
-
-        void Chip(Graphics g, string glyph, RectangleF r, bool active)
-        {
-            FillRound(g, active ? Accent : Card, r, S(4));
-            using (var b = new SolidBrush(active ? Color.White : Dim))
+            Color fill = active ? theme.Accent : theme.Card;
+            if (hovered) fill = HoverFill(fill);
+            FillRound(g, fill, r, S(4));
+            using (var b = new SolidBrush(active ? theme.ChipText : theme.DimText))
             using (var c = new StringFormat())
             {
                 c.Alignment = StringAlignment.Center;
@@ -402,9 +534,9 @@ namespace AiUsageWidget
 
         void Bar(Graphics g, double v, RectangleF r, bool dim)
         {
-            FillRound(g, Line, r, r.Height / 2);
+            FillRound(g, theme.Line, r, r.Height / 2);
             float w = Math.Max(r.Height, r.Width * (float)(Math.Min(100, Math.Max(0, v)) / 100));
-            FillRound(g, Fade(ColorFor(v), dim), new RectangleF(r.X, r.Y, w, r.Height), r.Height / 2);
+            FillRound(g, Fade(ColorAt(v), dim), new RectangleF(r.X, r.Y, w, r.Height), r.Height / 2);
         }
 
         public static string DefaultLabel(WindowKind kind)
@@ -470,6 +602,73 @@ namespace AiUsageWidget
             foreach (WindowVm w in windows)
                 if (w.Primary && w.Kind == kind) return w;
             return null;
+        }
+
+        // --- hit-testing -----------------------------------------------------------------
+
+        // Where a point lands, using the same layout maths as Draw. The header buttons and
+        // footer chips win over the body (the body never reaches those bands).
+        public HitInfo HitTest(Point p, float winWidth, float winHeight, int mode, int scroll,
+            List<RowVm> rows)
+        {
+            if (MenuRect(winWidth).Contains(p)) return new HitInfo { Kind = HitKind.MenuButton, Row = -1, Window = -1 };
+            if (RefreshRect(winWidth).Contains(p)) return new HitInfo { Kind = HitKind.RefreshButton, Row = -1, Window = -1 };
+            if (CloseRect(winWidth).Contains(p)) return new HitInfo { Kind = HitKind.CloseButton, Row = -1, Window = -1 };
+            if (DetailedRect(winWidth, winHeight).Contains(p)) return new HitInfo { Kind = HitKind.DetailedChip, Row = -1, Window = -1 };
+            if (CompactRect(winWidth, winHeight).Contains(p)) return new HitInfo { Kind = HitKind.CompactChip, Row = -1, Window = -1 };
+
+            var body = new RectangleF(0, HeaderHeight, winWidth, winHeight - HeaderHeight - FooterHeight);
+            if (!body.Contains(p)) return new HitInfo();
+            int clamped = ClampedScroll(winWidth, winHeight, mode, scroll, rows);
+            float top = HeaderHeight - clamped;
+            if (mode == 0) return HitTestDetailed(p, winWidth, top, rows);
+            return HitTestCompact(p, winWidth, top, rows);
+        }
+
+        HitInfo HitTestDetailed(Point p, float width, float top, List<RowVm> rows)
+        {
+            float y = top + DetailedBodyPad();
+            for (int i = 0; i < rows.Count; i++)
+            {
+                RowVm r = rows[i];
+                RectangleF card = DetailedCardRect(r, y, width);
+                if (card.Contains(p))
+                {
+                    if (DetailedTitleBox(card).Contains(p))
+                        return new HitInfo { Kind = HitKind.RowTitle, Row = i, Window = -1 };
+                    for (int j = 0; j < r.Windows.Count; j++)
+                        if (DetailedLineBox(card, j).Contains(p))
+                            return new HitInfo { Kind = HitKind.UsageWindow, Row = i, Window = j };
+                    return new HitInfo();   // card padding
+                }
+                y += RowHeight(0, r);
+            }
+            return new HitInfo();
+        }
+
+        HitInfo HitTestCompact(Point p, float width, float top, List<RowVm> rows)
+        {
+            List<WindowKind> kinds = CompactColumns(rows);
+            float cols = CompactColsLeft(width, rows);
+            float y = top + CompactLabelBand();
+            for (int i = 0; i < rows.Count; i++)
+            {
+                RowVm r = rows[i];
+                if (CompactTitleBox(cols, y).Contains(p))
+                    return new HitInfo { Kind = HitKind.RowTitle, Row = i, Window = -1 };
+                for (int j = 0; j < kinds.Count; j++)
+                {
+                    if (r.Windows.Count == 0) break;   // message rows own the whole column band
+                    RectangleF cell = CompactCellBox(cols, j, y);
+                    if (!cell.Contains(p)) continue;
+                    WindowVm wnd = WindowInColumn(r.Windows, kinds[j]);
+                    if (wnd == null) return new HitInfo();   // the "—" placeholder
+                    return new HitInfo { Kind = HitKind.UsageWindow, Row = i,
+                        Window = r.Windows.IndexOf(wnd) };
+                }
+                y += CompactRowPitch();
+            }
+            return new HitInfo();
         }
 
         static GraphicsPath Round(RectangleF r, float rad)

@@ -42,6 +42,15 @@ namespace AiUsageWidget
         bool refreshWasBusy;       // to spot the Busy true->false edge in OnRefreshChanged
         bool inDpiChange;          // WM_DPICHANGED can re-enter via its own bounds change
         bool resumeRefreshPending; // coalesce resume/network events into one refresh
+        float dpiScale;            // kept so the painter can be rebuilt for theme changes
+        bool lightTheme;           // the resolved "system" / dark / light palette in use
+        bool pointerOver;          // pointer on the widget: hover, tooltips, full opacity
+        HitInfo hover;             // element under the pointer; drives hover fills + tooltip
+        readonly ToolTip toolTip = new ToolTip();   // the widget has no child controls to attach one to
+
+        // Windows 11 rounds the corners and draws its own edge; the manifest declares the
+        // Windows 10+ supportedOS GUID, so the build number is the real one.
+        static readonly bool RoundedCorners = Environment.OSVersion.Version.Build >= 22000;
 
         public WidgetForm(string versionText)
         {
@@ -56,7 +65,9 @@ namespace AiUsageWidget
             refresh = new RefreshService(activeProviders.ToArray(), UtcNow, AppPaths.CachePath);
             updater = new Updater(settings.Update, AppPaths.RunningExePath, new Version(versionText));
             using (Graphics g = CreateGraphics())
-                painter = new Painter(g.DpiX / 96f);
+                dpiScale = g.DpiX / 96f;
+            lightTheme = ResolveLightTheme();
+            ReplacePainter();
             detailedWidth = (int)painter.S(340);
 
             mode = settings.Layout == "compact" ? 1 : 0;
@@ -68,7 +79,6 @@ namespace AiUsageWidget
             MaximizeBox = false;
             MinimizeBox = false;
             StartPosition = FormStartPosition.Manual;
-            BackColor = Painter.Background;
             DoubleBuffered = true;
             ResizeRedraw = true;
             KeyPreview = true;
@@ -83,10 +93,12 @@ namespace AiUsageWidget
             AnnounceNewProviders();
             BuildMenu();
             InitTimers();
+            UpdateOpacity();
 
-            // Resume and network return can each leave data stale; both events arrive on
-            // other threads, so the handlers marshal onto the UI thread.
+            // Resume, network return and theme flips arrive on other threads or out of
+            // band, so the handlers marshal onto the UI thread.
             SystemEvents.PowerModeChanged += OnPowerModeChanged;
+            SystemEvents.UserPreferenceChanged += OnUserPreferenceChanged;
             NetworkChange.NetworkAvailabilityChanged += OnNetworkAvailabilityChanged;
 
             refresh.Changed = OnRefreshChanged;
@@ -375,6 +387,20 @@ namespace AiUsageWidget
             if (e.Mode == PowerModes.Resume) ScheduleDelayedRefresh();
         }
 
+        void OnUserPreferenceChanged(object sender, UserPreferenceChangedEventArgs e)
+        {
+            // With "system" selected the Windows app theme can flip while the widget runs.
+            if (settings.Theme != "system") return;
+            try
+            {
+                BeginInvoke((MethodInvoker)delegate { ApplyTheme(); });
+            }
+            catch (InvalidOperationException)
+            {
+                // no handle yet (or already gone): nothing to re-theme
+            }
+        }
+
         void OnNetworkAvailabilityChanged(object sender, NetworkAvailabilityEventArgs e)
         {
             if (e.IsAvailable) ScheduleDelayedRefresh();
@@ -399,6 +425,56 @@ namespace AiUsageWidget
             {
                 // no handle yet (or already gone): nothing to schedule on
             }
+        }
+
+        // --- palette, painter and opacity -----------------------------------------------
+
+        const string PersonalizeKeyPath =
+            "Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize";
+
+        bool ResolveLightTheme()
+        {
+            string t = settings.Theme;
+            return t == "light" || (t != "dark" && AppsUseLightTheme());
+        }
+
+        // HKCU\...\Themes\Personalize AppsUseLightTheme: 1 = light, missing = dark.
+        static bool AppsUseLightTheme()
+        {
+            using (RegistryKey key = Registry.CurrentUser.OpenSubKey(PersonalizeKeyPath))
+            {
+                object value = key == null ? null : key.GetValue("AppsUseLightTheme");
+                return value is int && (int)value == 1;
+            }
+        }
+
+        void ApplyTheme()
+        {
+            bool light = ResolveLightTheme();
+            if (light == lightTheme) return;
+            lightTheme = light;
+            ReplacePainter();
+            Invalidate();
+        }
+
+        // Builds the painter at the current scale, resolved palette and colour thresholds;
+        // BackColor follows the palette so the window base matches what is drawn on it.
+        void ReplacePainter()
+        {
+            Painter old = painter;
+            painter = new Painter(dpiScale, lightTheme ? Theme.Light : Theme.Dark,
+                settings.WarnPercent, settings.CriticalPercent);
+            painter.DrawBorder = !RoundedCorners;
+            if (old != null) old.Dispose();
+            BackColor = painter.Background;
+        }
+
+        // settings.Opacity (40..100) while idle; fully opaque while the pointer is over it.
+        void UpdateOpacity()
+        {
+            int percent = pointerOver ? 100 : Settings.Clamp(settings.Opacity, 40, 100);
+            double target = percent / 100.0;
+            if (Opacity != target) Opacity = target;
         }
 
         [System.Runtime.InteropServices.DllImport("kernel32.dll")]
@@ -459,6 +535,12 @@ namespace AiUsageWidget
                 tray.Icon = icon == null ? SystemIcons.Application : new Icon(icon, SystemInformation.SmallIconSize);
             tray.Text = TrayText();
             tray.Visible = true;
+            tray.Click += delegate
+            {
+                // One left click toggles the widget; double-click below keeps showing it.
+                if (Visible) HideToTray();
+                else ShowAndActivate();
+            };
             tray.DoubleClick += delegate { ShowAndActivate(); };
         }
 
@@ -591,8 +673,24 @@ namespace AiUsageWidget
             Activate();
         }
 
+        // The tray icon and the widget itself (right-click, or the "⋯" header button) show
+        // this one menu instance; BuildMenu replaces it wholesale on every state change.
+        void ShowWidgetMenu(Point screen)
+        {
+            ContextMenuStrip menu = tray.ContextMenuStrip;
+            if (menu == null) return;
+            menu.Show(screen);
+        }
+
         void HideToTray()
         {
+            ExitHover();
+            if (!settings.TrayHintShown)
+            {
+                Balloon("AI Usage Widget is still running. Double-click the tray icon to show it.");
+                settings.TrayHintShown = true;
+                SaveSettings();
+            }
             Hide();
         }
 
@@ -685,22 +783,126 @@ namespace AiUsageWidget
                 }
             }
             if (!latest.HasValue) return "";
-            TimeSpan age = DateTime.UtcNow - latest.Value;
+            return UpdatedText(latest.Value);
+        }
+
+        // The header note and the row-title tooltip say the age the same way.
+        static string UpdatedText(DateTime fetchedUtc)
+        {
+            TimeSpan age = DateTime.UtcNow - fetchedUtc;
             if (age.TotalSeconds < 60) return "updated just now";
             if (age.TotalMinutes < 60) return "updated " + (int)age.TotalMinutes + " min ago";
             return "updated " + Painter.Duration(age) + " ago";
+        }
+
+        // --- hover, tooltips and the hand cursor -----------------------------------------
+
+        const int TooltipDurationMs = 7000;
+
+        void EnterHover(Point p)
+        {
+            if (!pointerOver)
+            {
+                pointerOver = true;
+                UpdateOpacity();
+            }
+            SetHover(painter.HitTest(p, ClientSize.Width, ClientSize.Height, mode, scroll,
+                BuildRowsNow()));
+        }
+
+        void ExitHover()
+        {
+            if (!pointerOver) return;
+            pointerOver = false;
+            SetHover(new HitInfo());
+            UpdateOpacity();
+        }
+
+        // Repaints and re-shows the tooltip only when the element under the pointer changes.
+        void SetHover(HitInfo h)
+        {
+            if (h.Equals(hover)) return;
+            hover = h;
+            Cursor = IsHandTarget(h) ? Cursors.Hand : Cursors.Default;
+            ShowTooltip(h);
+            Invalidate();
+        }
+
+        static bool IsHandTarget(HitInfo h)
+        {
+            return h.Kind == HitKind.MenuButton || h.Kind == HitKind.RefreshButton
+                || h.Kind == HitKind.CloseButton || h.Kind == HitKind.DetailedChip
+                || h.Kind == HitKind.CompactChip;
+        }
+
+        void ShowTooltip(HitInfo h)
+        {
+            toolTip.Hide(this);
+            string text = TooltipFor(h);
+            if (text == null) return;
+            Point p = PointToClient(Cursor.Position);
+            toolTip.Show(text, this, p.X + 16, p.Y + 12, TooltipDurationMs);
+        }
+
+        string TooltipFor(HitInfo h)
+        {
+            if (h.Kind == HitKind.MenuButton) return "Menu";
+            if (h.Kind == HitKind.RefreshButton) return "Refresh now";
+            if (h.Kind == HitKind.CloseButton) return "Hide to tray";
+            if (h.Kind != HitKind.RowTitle && h.Kind != HitKind.UsageWindow) return null;
+            List<RowVm> rows = BuildRowsNow();
+            if (h.Row < 0 || h.Row >= rows.Count) return null;
+            RowVm row = rows[h.Row];
+            if (h.Kind == HitKind.RowTitle) return RowTooltip(row);
+            if (h.Window < 0 || h.Window >= row.Windows.Count) return null;
+            return WindowTooltip(row.Windows[h.Window]);
+        }
+
+        // Provider name, plan, the age of the data, and the full message the row itself
+        // only shows shortened.
+        static string RowTooltip(RowVm row)
+        {
+            var lines = new List<string>();
+            if (!string.IsNullOrEmpty(row.Name)) lines.Add(row.Name);
+            if (!string.IsNullOrEmpty(row.Plan)) lines.Add(row.Plan);
+            if (row.FetchedAtUtc != DateTime.MinValue) lines.Add(UpdatedText(row.FetchedAtUtc));
+            if (!string.IsNullOrEmpty(row.Msg)) lines.Add(row.Msg);
+            return lines.Count == 0 ? null : string.Join("\n", lines.ToArray());
+        }
+
+        static string WindowTooltip(WindowVm wnd)
+        {
+            var lines = new List<string>();
+            lines.Add(wnd.Label);
+            lines.Add(wnd.UsedPercent.ToString("0.0", CultureInfo.InvariantCulture) + "%");
+            if (!string.IsNullOrEmpty(wnd.Detail))
+                lines.Add(wnd.Detail + (string.IsNullOrEmpty(wnd.Unit) ? "" : " " + wnd.Unit));
+            if (wnd.ResetsAtUtc.HasValue)
+                lines.Add("resets " + wnd.ResetsAtUtc.Value.ToLocalTime().ToString(
+                    "ddd dd MMM HH:mm", CultureInfo.CurrentCulture));
+            return string.Join("\n", lines.ToArray());
         }
 
         protected override void OnPaint(PaintEventArgs e)
         {
             List<RowVm> rows = BuildRowsNow();
             painter.Draw(e.Graphics, ClientSize.Width, ClientSize.Height, mode, scroll, rows,
-                HeaderNote(), FooterNote());
+                HeaderNote(), FooterNote(), hover);
         }
 
         protected override void OnMouseDown(MouseEventArgs e)
         {
+            if (e.Button != MouseButtons.Left)
+            {
+                base.OnMouseDown(e);   // right-click reaches the menu via WM_CONTEXTMENU
+                return;
+            }
             float w = ClientSize.Width;
+            if (painter.MenuRect(w).Contains(e.Location))
+            {
+                ShowWidgetMenu(PointToScreen(e.Location));
+                return;
+            }
             if (painter.RefreshRect(w).Contains(e.Location))
             {
                 RunRefresh(true);
@@ -724,6 +926,18 @@ namespace AiUsageWidget
             base.OnMouseDown(e);
         }
 
+        protected override void OnMouseMove(MouseEventArgs e)
+        {
+            EnterHover(e.Location);
+            base.OnMouseMove(e);
+        }
+
+        protected override void OnMouseLeave(EventArgs e)
+        {
+            ExitHover();
+            base.OnMouseLeave(e);
+        }
+
         protected override void OnMouseWheel(MouseEventArgs e)
         {
             List<RowVm> rows = BuildRowsNow();
@@ -732,6 +946,7 @@ namespace AiUsageWidget
             scroll -= e.Delta / 4;
             scroll = (int)Math.Max(0, Math.Min(scroll, max));
             Invalidate();
+            EnterHover(new Point(e.X, e.Y));   // the content moved under a still pointer
         }
 
         protected override void OnKeyDown(KeyEventArgs e)
@@ -778,6 +993,7 @@ namespace AiUsageWidget
         {
             // Static system events: always unsubscribe.
             SystemEvents.PowerModeChanged -= OnPowerModeChanged;
+            SystemEvents.UserPreferenceChanged -= OnUserPreferenceChanged;
             NetworkChange.NetworkAvailabilityChanged -= OnNetworkAvailabilityChanged;
             refreshTimer.Stop();
             minuteTimer.Stop();
@@ -790,19 +1006,69 @@ namespace AiUsageWidget
             noteTimer.Dispose();
             resumeTimer.Dispose();
             tray.Dispose();
+            toolTip.Dispose();
             base.OnFormClosed(e);
             painter.Dispose();
         }
 
-        // WS_EX_TOOLWINDOW keeps the widget out of Alt+Tab.
+        // WS_EX_TOOLWINDOW keeps the widget out of Alt+Tab; CS_DROPSHADOW gives it the
+        // system drop shadow on every Windows version.
         protected override CreateParams CreateParams
         {
             get
             {
                 CreateParams cp = base.CreateParams;
-                cp.ExStyle |= 0x80;   // WS_EX_TOOLWINDOW
+                cp.ExStyle |= 0x80;              // WS_EX_TOOLWINDOW
+                cp.ClassStyle |= 0x00020000;     // CS_DROPSHADOW
                 return cp;
             }
+        }
+
+        protected override void OnHandleCreated(EventArgs e)
+        {
+            base.OnHandleCreated(e);
+            TryRoundCorners();
+        }
+
+        [System.Runtime.InteropServices.DllImport("dwmapi.dll")]
+        static extern int DwmSetWindowAttribute(IntPtr hwnd, int attribute, ref int value, int size);
+
+        // Ask DWM for rounded corners on Windows 11; it draws the window edge there, which
+        // is why the painter drops its own border (ReplacePainter). Failures are ignored.
+        void TryRoundCorners()
+        {
+            if (!RoundedCorners) return;
+            int round = 2;   // DWMWA_WINDOW_CORNER_PREFERENCE (33), DWMWCP_ROUND
+            try
+            {
+                DwmSetWindowAttribute(Handle, 33, ref round, 4);
+            }
+            catch (Exception)
+            {
+            }
+        }
+
+        [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+        struct TrackMouseEventRecord
+        {
+            public int Size;
+            public int Flags;
+            public IntPtr Track;
+            public int HoverTime;
+        }
+
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        static extern bool TrackMouseEvent(ref TrackMouseEventRecord record);
+
+        // WinForms tracks client-area leaves on its own; the non-client leave (the drag
+        // areas) only arrives when asked for, once per call.
+        void ArmNonClientLeaveTracking()
+        {
+            var record = new TrackMouseEventRecord();
+            record.Size = System.Runtime.InteropServices.Marshal.SizeOf(typeof(TrackMouseEventRecord));
+            record.Flags = 0x02 | 0x10;   // TME_LEAVE | TME_NONCLIENT
+            record.Track = Handle;
+            TrackMouseEvent(ref record);
         }
 
         // Appearing never steals focus; ShowAndActivate still brings it to the front.
@@ -819,6 +1085,10 @@ namespace AiUsageWidget
             const int WM_NCHITTEST = 0x0084;
             const int WM_DPICHANGED = 0x02E0;
             const int WM_NCLBUTTONDBLCLK = 0x00A3;
+            const int WM_NCMOUSEMOVE = 0x00A0;
+            const int WM_NCMOUSELEAVE = 0x02A2;
+            const int WM_NCRBUTTONUP = 0x00A5;
+            const int WM_CONTEXTMENU = 0x007B;
             if (m.Msg == WM_NCLBUTTONDBLCLK) return;
             if (m.Msg == Program.ShowMessageId)
             {
@@ -828,6 +1098,42 @@ namespace AiUsageWidget
             if (m.Msg == WM_DPICHANGED)
             {
                 HandleDpiChanged(m);
+                return;
+            }
+            if (m.Msg == WM_NCMOUSEMOVE)
+            {
+                // Almost the whole window is HTCAPTION (non-client), so hover and the
+                // tooltips ride on the non-client mouse messages.
+                ArmNonClientLeaveTracking();
+                long lp = m.LParam.ToInt64();
+                Point p = PointToClient(new Point((short)(lp & 0xFFFF), (short)((lp >> 16) & 0xFFFF)));
+                EnterHover(p);
+                base.WndProc(ref m);
+                return;
+            }
+            if (m.Msg == WM_NCMOUSELEAVE)
+            {
+                ExitHover();
+                base.WndProc(ref m);
+                return;
+            }
+            if (m.Msg == WM_NCRBUTTONUP)
+            {
+                // Answered here so DefWindowProc never turns it into WM_CONTEXTMENU too
+                // (the menu would open twice).
+                long lp = m.LParam.ToInt64();
+                ShowWidgetMenu(new Point((short)(lp & 0xFFFF), (short)((lp >> 16) & 0xFFFF)));
+                return;
+            }
+            if (m.Msg == WM_CONTEXTMENU)
+            {
+                // Right-clicks on the client-area buttons land here; lParam -1 means the
+                // keyboard asked for the menu.
+                long lp = m.LParam.ToInt64();
+                Point screen = lp == -1
+                    ? PointToScreen(new Point(Width / 2, (int)painter.HeaderHeight))
+                    : new Point((short)(lp & 0xFFFF), (short)((lp >> 16) & 0xFFFF));
+                ShowWidgetMenu(screen);
                 return;
             }
             if (m.Msg == WM_NCHITTEST)
@@ -842,8 +1148,9 @@ namespace AiUsageWidget
                     if (l) code = 10;           // HTLEFT: width only, Detailed only
                     else if (r) code = 11;      // HTRIGHT
                 }
-                if (code == 2 && (painter.RefreshRect(w).Contains(p) || painter.CloseRect(w).Contains(p)
-                    || painter.DetailedRect(w, h).Contains(p) || painter.CompactRect(w, h).Contains(p)))
+                if (code == 2 && (painter.MenuRect(w).Contains(p) || painter.RefreshRect(w).Contains(p)
+                    || painter.CloseRect(w).Contains(p) || painter.DetailedRect(w, h).Contains(p)
+                    || painter.CompactRect(w, h).Contains(p)))
                     code = 1;                   // HTCLIENT: header buttons and footer chips handle clicks
                 m.Result = (IntPtr)code;
                 return;
@@ -864,9 +1171,8 @@ namespace AiUsageWidget
                 int top = System.Runtime.InteropServices.Marshal.ReadInt32(m.LParam, 4);
                 int right = System.Runtime.InteropServices.Marshal.ReadInt32(m.LParam, 8);
                 int bottom = System.Runtime.InteropServices.Marshal.ReadInt32(m.LParam, 12);
-                Painter old = painter;
-                painter = new Painter(newDpi / 96f);
-                old.Dispose();
+                dpiScale = newDpi / 96f;
+                ReplacePainter();
                 MinimumSize = new Size((int)painter.S(300), (int)painter.S(120));
                 Bounds = Rectangle.FromLTRB(left, top, right, bottom);
                 if (mode == 0) detailedWidth = ClientSize.Width;

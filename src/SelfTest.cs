@@ -73,6 +73,9 @@ namespace AiUsageWidget
             Check(lines, "painter_extended_rows_and_columns", PainterExtendedRowsAndColumns);
             Check(lines, "update_signature_verifies", UpdateSignatureVerifies);
             Check(lines, "unsigned_build_disables_updates", UnsignedBuildDisablesUpdates);
+            Check(lines, "provider_info_catalogue", ProviderInfoCatalogue);
+            Check(lines, "consent_rows_plan", ConsentRowsPlan);
+            Check(lines, "settings_form_values_round_trip", SettingsFormValuesRoundTrip);
 
             string[] all = lines.ToArray();
             if (!string.IsNullOrEmpty(outPath)) File.WriteAllLines(outPath, all, new UTF8Encoding(false)); // no BOM: the log must start with PASS
@@ -1689,6 +1692,199 @@ namespace AiUsageWidget
             var updater = new Updater(cfg, "unused.exe", new Version(0, 1), "");
             updater.CheckAsync().GetAwaiter().GetResult();
             That(updater.StatusText == "updates disabled (unsigned build)", "unsigned status");
+        }
+
+        // --- v0.4.0 checks ---------------------------------------------------------------
+
+        static void ProviderInfoCatalogue()
+        {
+            // Every registered provider id must have a real catalogue entry with text.
+            foreach (IUsageProvider p in ProviderRegistry.All)
+            {
+                ProviderInfoEntry found = null;
+                foreach (ProviderInfoEntry e in ProviderInfo.Entries)
+                    if (e.Id == p.Id) found = e;
+                That(found != null, "registered provider " + p.Id + " has a catalogue entry");
+                That(!string.IsNullOrEmpty(found.Reads) && !string.IsNullOrEmpty(found.Contacts),
+                    "catalogue text non-empty for " + p.Id);
+            }
+
+            // The full documented catalogue, including ids not registered yet.
+            string[] ids = { "claude-code", "codex", "zai", "cursor", "github-copilot",
+                "openrouter", "antigravity", "opencode-go", "muse" };
+            foreach (string id in ids)
+                That(ProviderInfo.For(id) != null, "catalogue covers " + id);
+
+            // Official only for OpenRouter, Muse and Antigravity.
+            That(ProviderInfo.For("openrouter").Official && ProviderInfo.For("muse").Official
+                && ProviderInfo.For("antigravity").Official,
+                "official only for openrouter, muse, antigravity");
+            That(!ProviderInfo.For("claude-code").Official && !ProviderInfo.For("codex").Official
+                && !ProviderInfo.For("zai").Official && !ProviderInfo.For("cursor").Official
+                && !ProviderInfo.For("github-copilot").Official
+                && !ProviderInfo.For("opencode-go").Official, "unofficial providers marked");
+
+            // Unknown and null ids fall back to non-empty generic text.
+            ProviderInfoEntry generic = ProviderInfo.For("no-such-provider");
+            That(generic != null && !string.IsNullOrEmpty(generic.Reads)
+                && !string.IsNullOrEmpty(generic.Contacts) && !generic.Official,
+                "unknown id falls back to generic text");
+            That(ProviderInfo.For(null) != null, "null id falls back too");
+        }
+
+        static void ConsentRowsPlan()
+        {
+            var providers = new List<IUsageProvider>();
+            providers.Add(new FakeProv("claude-code"));
+            providers.Add(new FakeProv("codex"));
+            providers.Add(new FakeProv("antigravity"));
+            providers.Add(new FakeProv("zai"));
+            providers.Add(new FakeProv("muse"));
+
+            // Claude detected and the experimental agy CLI detected: both come first, but
+            // only plain detected providers tick.
+            Func<string, bool> detectAgy = delegate(string id)
+            {
+                return id == "claude-code" || id == "antigravity";
+            };
+            List<ConsentForm.ConsentRow> rows = ConsentForm.PlanRows(providers, detectAgy);
+            That(rows.Count == 5, "every provider planned");
+            That(rows[0].Provider.Id == "claude-code" && rows[0].Checked && rows[0].Mark == null,
+                "detected first and ticked");
+            That(rows[1].Provider.Id == "antigravity" && !rows[1].Checked
+                && rows[1].Mark == ConsentForm.ExperimentalMark,
+                "detected experimental unticked and marked");
+            That(rows[2].Provider.Id == "codex" && !rows[2].Checked
+                && rows[2].Mark == ConsentForm.NotFoundMark, "undetected unticked and marked");
+            That(rows[3].Provider.Id == "zai" && !rows[3].Checked, "undetected keeps given order");
+            That(rows[4].Provider.Id == "muse" && !rows[4].Checked, "undetected muse last");
+
+            // Undetected experimental: the experimental mark wins over "not found".
+            Func<string, bool> detectClaude = delegate(string id) { return id == "claude-code"; };
+            rows = ConsentForm.PlanRows(providers, detectClaude);
+            That(rows[1].Provider.Id == "codex" && !rows[1].Checked
+                && rows[1].Mark == ConsentForm.NotFoundMark, "undetected marked not found");
+            That(rows[2].Provider.Id == "antigravity" && !rows[2].Checked
+                && rows[2].Mark == ConsentForm.ExperimentalMark,
+                "experimental mark wins over not found");
+
+            // No detector or no providers: nothing ticked, no crash. Everything is
+            // undetected now, so the given order is kept throughout.
+            rows = ConsentForm.PlanRows(providers, null);
+            That(rows.Count == 5 && !rows[0].Checked
+                && rows[2].Mark == ConsentForm.ExperimentalMark,
+                "no detector -> nothing ticked, experimental still marked");
+            That(ConsentForm.PlanRows(null, detectClaude).Count == 0, "null providers -> empty plan");
+            That(ConsentForm.PlanRows(new List<IUsageProvider>(), detectClaude).Count == 0,
+                "no providers -> empty plan");
+
+            // A throwing detector must not break the plan (treated as not detected).
+            Func<string, bool> exploding = delegate(string id)
+            {
+                throw new InvalidOperationException("boom");
+            };
+            rows = ConsentForm.PlanRows(providers, exploding);
+            That(rows.Count == 5 && !rows[0].Checked, "throwing detector reads as not detected");
+        }
+
+        static void SettingsFormValuesRoundTrip()
+        {
+            string path = Path.Combine(AppPaths.DataDir, "settings-form-values.json");
+            File.WriteAllText(path, "{\"refreshMinutes\":150,\"layout\":\"compact\"," +
+                "\"alwaysOnTop\":false,\"theme\":\"light\",\"opacity\":55,\"warnPercent\":30," +
+                "\"criticalPercent\":31,\"autoDetect\":false," +
+                "\"providers\":[{\"id\":\"zai\",\"enabled\":false},{\"id\":\"muse\",\"enabled\":true}]," +
+                "\"notifications\":{\"enabled\":false,\"thresholds\":[90,10],\"onReset\":true}," +
+                "\"update\":{\"mode\":\"off\"}}");
+            Settings s = Settings.Load(path);
+
+            SettingsForm.WorkingValues v = SettingsForm.ReadFrom(s);
+            That(v.RefreshMinutes == 120 && v.Layout == "compact" && !v.AlwaysOnTop,
+                "general values read and clamped");
+            That(v.Theme == "light" && v.Opacity == 55 && v.WarnPercent == 30
+                && v.CriticalPercent == 31, "appearance values read");
+            That(!v.AutoDetect, "autoDetect read");
+            That(v.Providers.Count == 2 && v.Providers[0].Id == "zai" && !v.Providers[0].Enabled
+                && v.Providers[1].Id == "muse" && v.Providers[1].Enabled, "provider list read");
+            That(!v.NotifyEnabled && v.NotifyLow == 10 && v.NotifyHigh == 90 && v.NotifyOnReset,
+                "notification values read, thresholds sorted");
+            That(v.UpdateMode == "off", "update mode read");
+
+            // ApplyTo into a fresh Settings, read back: every scalar and the provider list
+            // must survive, without shared list references either way.
+            Settings back = new Settings();
+            SettingsForm.ApplyTo(v, back);
+            SettingsForm.WorkingValues v2 = SettingsForm.ReadFrom(back);
+            That(v2.RefreshMinutes == v.RefreshMinutes && v2.Layout == v.Layout
+                && v2.AlwaysOnTop == v.AlwaysOnTop && v2.Theme == v.Theme
+                && v2.Opacity == v.Opacity && v2.WarnPercent == v.WarnPercent
+                && v2.CriticalPercent == v.CriticalPercent && v2.AutoDetect == v.AutoDetect
+                && v2.NotifyEnabled == v.NotifyEnabled && v2.NotifyLow == v.NotifyLow
+                && v2.NotifyHigh == v.NotifyHigh && v2.NotifyOnReset == v.NotifyOnReset
+                && v2.UpdateMode == v.UpdateMode, "every scalar round-trips");
+            That(v2.Providers.Count == 2 && v2.Providers[0].Id == "zai"
+                && !v2.Providers[0].Enabled && v2.Providers[1].Id == "muse"
+                && v2.Providers[1].Enabled, "provider list round-trips");
+            back.Providers[0].Enabled = true;
+            That(!v.Providers[0].Enabled, "apply copies the provider list instead of sharing it");
+
+            // Threshold validation on apply: critical strictly above warn, both clamped.
+            var bad = new SettingsForm.WorkingValues();
+            bad.WarnPercent = 95;
+            bad.CriticalPercent = 20;
+            SettingsForm.ApplyTo(bad, back);
+            That(back.WarnPercent == 95 && back.CriticalPercent == 96,
+                "critical pushed above warn");
+            bad.WarnPercent = 200;
+            bad.CriticalPercent = 300;
+            SettingsForm.ApplyTo(bad, back);
+            That(back.WarnPercent == 98 && back.CriticalPercent == 99, "percent ranges clamped");
+
+            // Notification thresholds: 0 disables one, order is normalised, duplicates go.
+            var n = new SettingsForm.WorkingValues();
+            n.NotifyLow = 0;
+            n.NotifyHigh = 95;
+            SettingsForm.ApplyTo(n, back);
+            That(back.Notifications.Thresholds.Count == 1 && back.Notifications.Thresholds[0] == 95,
+                "0 disables the first threshold");
+            n.NotifyLow = 80;
+            n.NotifyHigh = 0;
+            SettingsForm.ApplyTo(n, back);
+            That(back.Notifications.Thresholds.Count == 1 && back.Notifications.Thresholds[0] == 80,
+                "0 disables the second threshold");
+            n.NotifyLow = 95;
+            n.NotifyHigh = 70;
+            SettingsForm.ApplyTo(n, back);
+            That(back.Notifications.Thresholds.Count == 2 && back.Notifications.Thresholds[0] == 70
+                && back.Notifications.Thresholds[1] == 95, "thresholds sorted on apply");
+            n.NotifyLow = 90;
+            n.NotifyHigh = 90;
+            SettingsForm.ApplyTo(n, back);
+            That(back.Notifications.Thresholds.Count == 1, "duplicate thresholds collapse");
+
+            // Merged provider ticks: stored entries keep their order, unlisted follow in
+            // the given order, experimental defaults to off.
+            var registry = new List<IUsageProvider>();
+            registry.Add(new FakeProv("claude-code"));
+            registry.Add(new FakeProv("codex"));
+            registry.Add(new FakeProv("zai"));
+            registry.Add(new FakeProv("antigravity"));
+            registry.Add(new FakeProv("muse"));
+            List<ProviderSetting> ticks = SettingsForm.MergedProviderTicks(s, registry);
+            That(ticks.Count == 5, "every provider merged once");
+            That(ticks[0].Id == "zai" && !ticks[0].Enabled, "listed disabled kept first");
+            That(ticks[1].Id == "muse" && ticks[1].Enabled, "listed enabled kept");
+            That(ticks[2].Id == "claude-code" && ticks[2].Enabled,
+                "unlisted non-experimental ticks on");
+            That(ticks[3].Id == "codex" && ticks[3].Enabled, "unlisted codex ticks on");
+            That(ticks[4].Id == "antigravity" && !ticks[4].Enabled,
+                "unlisted experimental stays off");
+
+            List<ProviderSetting> fresh = SettingsForm.MergedProviderTicks(null, registry);
+            That(fresh.Count == 5 && fresh[0].Enabled && !fresh[3].Enabled,
+                "null settings -> defaults with experimental off");
+            That(SettingsForm.MergedProviderTicks(s, new List<IUsageProvider>()).Count == 0,
+                "no providers -> no rows");
         }
 
     }

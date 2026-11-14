@@ -64,11 +64,15 @@ namespace AiUsageWidget.Core
                     // A surviving child can hold the pipes open for ever after the main process
                     // exits, so the reads are bounded: a couple of seconds, then give up on
                     // whatever has not arrived.
+                    string outText = ReadBounded(stdout);
+                    string errText = ReadBounded(stderr);
+                    // Cancelled while draining the pipes: report it rather than a success.
+                    if (ct.IsCancellationRequested) throw new OperationCanceledException(ct);
                     return new CliResult
                     {
                         ExitCode = proc.ExitCode,
-                        StdOut = ReadBounded(stdout),
-                        StdErr = ReadBounded(stderr)
+                        StdOut = outText,
+                        StdErr = errText
                     };
                 }
             }

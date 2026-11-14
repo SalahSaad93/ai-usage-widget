@@ -54,8 +54,22 @@ namespace AiUsageWidget.Core
                     result.Status = (int)resp.StatusCode;
                     if (resp.Content != null)
                     {
-                        if (asBytes) result.Bytes = await resp.Content.ReadAsByteArrayAsync();
-                        else result.Text = await resp.Content.ReadAsStringAsync();
+                        // The body read takes no token: a server that sends headers and then
+                        // stalls would hang it. Disposing the response on cancel aborts it.
+                        using (ct.Register(delegate { resp.Dispose(); }))
+                        {
+                            try
+                            {
+                                if (asBytes) result.Bytes = await resp.Content.ReadAsByteArrayAsync();
+                                else result.Text = await resp.Content.ReadAsStringAsync();
+                            }
+                            catch (Exception)
+                            {
+                                if (ct.IsCancellationRequested) throw new OperationCanceledException(ct);
+                                throw;
+                            }
+                        }
+                        ct.ThrowIfCancellationRequested();
                     }
                     return result;
                 }

@@ -269,7 +269,10 @@ namespace AiUsageWidget.Core
             bool swapped = false;
             try
             {
-                swapped = TrySwap(runningExePath, newExePath, startNew);
+                // Install the bytes that were just verified, not whatever the file holds a
+                // moment later: nothing can be swapped in between the check and the install.
+                swapped = TrySwapBytes(runningExePath, onDisk, startNew);
+                if (swapped) TryDelete(newExePath);
             }
             catch (Exception ex)
             {
@@ -288,6 +291,40 @@ namespace AiUsageWidget.Core
             }
             SetStatus("update failed");
             return false;
+        }
+
+        // As TrySwap, but the new exe is written from bytes already verified in memory.
+        public static bool TrySwapBytes(string runningExePath, byte[] newExe, Action<string> startNew)
+        {
+            if (newExe == null || newExe.Length == 0) return false;
+            string dir = Path.GetDirectoryName(runningExePath);
+            string oldPath = Path.Combine(dir,
+                Path.GetFileNameWithoutExtension(runningExePath) + ".old" + Path.GetExtension(runningExePath));
+            try
+            {
+                if (File.Exists(oldPath)) File.Delete(oldPath);
+                File.Move(runningExePath, oldPath);
+            }
+            catch (IOException)
+            {
+                return false;
+            }
+            catch (UnauthorizedAccessException)
+            {
+                return false;
+            }
+            try
+            {
+                File.WriteAllBytes(runningExePath, newExe);
+                startNew(runningExePath);
+                return true;
+            }
+            catch (Exception)
+            {
+                TryDelete(runningExePath);
+                Rollback(oldPath, runningExePath);
+                return false;
+            }
         }
 
         // Rename the running exe to <name>.old.exe, move the new one into place, launch it

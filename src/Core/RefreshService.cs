@@ -127,7 +127,22 @@ namespace AiUsageWidget.Core
             {
                 try
                 {
-                    result.Snapshot = await p.FetchAsync(cts.Token);
+                    // A provider that ignores its token must not keep the refresh busy for
+                    // ever: a few seconds after the deadline its result is abandoned.
+                    Task<UsageSnapshot> fetch = p.FetchAsync(cts.Token);
+                    Task grace = Task.Delay(TimeSpan.FromSeconds(TimeoutSeconds + 5));
+                    if (await Task.WhenAny(fetch, grace) == fetch)
+                    {
+                        result.Snapshot = await fetch;
+                    }
+                    else
+                    {
+                        result.TimedOut = true;
+                        Task ignored = fetch.ContinueWith(delegate(Task<UsageSnapshot> t)
+                        {
+                            Exception observed = t.Exception;   // observe a late failure
+                        }, TaskContinuationOptions.OnlyOnFaulted);
+                    }
                 }
                 catch (OperationCanceledException)
                 {

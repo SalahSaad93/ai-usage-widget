@@ -1,6 +1,5 @@
 using System;
 using System.Reflection;
-using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
@@ -10,17 +9,28 @@ namespace AiUsageWidget
 {
     internal static class Program
     {
-        // Broadcast by a second instance (HWND_BROADCAST) so the first one shows its
-        // window; the widget handles it in WidgetForm.WndProc.
-        public static readonly int ShowMessageId = (int)RegisterWindowMessage("AiUsageWidget.Show");
+        // Named events the running widget listens on (see WidgetForm). A second launch sets
+        // ShowEventName so the first instance shows its window; `--test-notification` sets
+        // the other so it shows a sample tray notification. Events, not window messages:
+        // the widget is an owned tool window, which a broadcast message does not reach.
+        public const string ShowEventName = @"Local\AiUsageWidget.Show";
+        public const string TestNotifyEventName = @"Local\AiUsageWidget.TestNotify";
 
-        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
-        static extern uint RegisterWindowMessage(string lpString);
-
-        [DllImport("user32.dll")]
-        static extern bool PostMessage(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
-
-        static readonly IntPtr HwndBroadcast = (IntPtr)0xffff;
+        // Sets a named event of the running instance; nothing happens when none is running.
+        static void Signal(string eventName)
+        {
+            try
+            {
+                using (EventWaitHandle handle = EventWaitHandle.OpenExisting(eventName))
+                    handle.Set();
+            }
+            catch (WaitHandleCannotBeOpenedException)
+            {
+            }
+            catch (UnauthorizedAccessException)
+            {
+            }
+        }
 
         [STAThread]
         static int Main(string[] args)
@@ -35,6 +45,12 @@ namespace AiUsageWidget
                 }
             }
 
+            if (Array.IndexOf(args, "--test-notification") >= 0)
+            {
+                Signal(TestNotifyEventName);
+                return 0;
+            }
+
             // --updated <oldPid>: wait for the old process, drop its .old file, then start.
             if (updatedPid >= 0) Updater.FinishUpdate(updatedPid);
 
@@ -44,7 +60,7 @@ namespace AiUsageWidget
                 if (!createdNew)
                 {
                     // Second instance: poke the running one to show its window, then exit.
-                    PostMessage(HwndBroadcast, (uint)ShowMessageId, IntPtr.Zero, IntPtr.Zero);
+                    Signal(ShowEventName);
                     return 0;   // single instance
                 }
                 InstallExceptionHandlers();

@@ -107,6 +107,8 @@ namespace AiUsageWidget
             // Resume, network return and theme flips arrive on other threads or out of
             // band, so the handlers marshal onto the UI thread.
             SystemEvents.PowerModeChanged += OnPowerModeChanged;
+            ListenFor(Program.ShowEventName, ShowAndActivate);            // a second launch
+            ListenFor(Program.TestNotifyEventName, SendTestNotification); // --test-notification
             SystemEvents.UserPreferenceChanged += OnUserPreferenceChanged;
             NetworkChange.NetworkAvailabilityChanged += OnNetworkAvailabilityChanged;
 
@@ -390,6 +392,38 @@ namespace AiUsageWidget
         void BalloonWarning(string text)
         {
             tray.ShowBalloonTip(4000, "AI Usage Widget", text, ToolTipIcon.Warning);
+        }
+
+        readonly List<System.Threading.EventWaitHandle> instanceSignals =
+            new List<System.Threading.EventWaitHandle>();
+        readonly List<System.Threading.RegisteredWaitHandle> instanceWaits =
+            new List<System.Threading.RegisteredWaitHandle>();
+
+        // Runs `action` on the UI thread each time another process sets the named event.
+        void ListenFor(string eventName, Action action)
+        {
+            var signal = new System.Threading.EventWaitHandle(false,
+                System.Threading.EventResetMode.AutoReset, eventName);
+            instanceSignals.Add(signal);
+            instanceWaits.Add(System.Threading.ThreadPool.RegisterWaitForSingleObject(signal,
+                delegate(object state, bool timedOut)
+                {
+                    if (IsDisposed || !IsHandleCreated) return;
+                    try
+                    {
+                        BeginInvoke(action);
+                    }
+                    catch (InvalidOperationException)
+                    {
+                        // the window is going away
+                    }
+                }, null, System.Threading.Timeout.Infinite, false));
+        }
+
+        void SendTestNotification()
+        {
+            BalloonWarning("Test: Claude Code week: 82% used, resets in 2h 10m");
+            Log.Info("test notification sent to Windows");
         }
 
         void RestoreSavedBounds()
@@ -878,6 +912,7 @@ namespace AiUsageWidget
                 using (SettingsForm dlg = new SettingsForm(settings, allProviders))
                 {
                     dlg.CurrentVersion = versionText;
+                    dlg.TestNotification = SendTestNotification;
                     if (dlg.ShowDialog(this) != DialogResult.OK) return;
                 }
                 ApplyLiveSettings();
@@ -1182,6 +1217,8 @@ namespace AiUsageWidget
         {
             // Static system events: always unsubscribe.
             SystemEvents.PowerModeChanged -= OnPowerModeChanged;
+            foreach (System.Threading.RegisteredWaitHandle wait in instanceWaits) wait.Unregister(null);
+            foreach (System.Threading.EventWaitHandle signal in instanceSignals) signal.Dispose();
             SystemEvents.UserPreferenceChanged -= OnUserPreferenceChanged;
             NetworkChange.NetworkAvailabilityChanged -= OnNetworkAvailabilityChanged;
             refreshTimer.Stop();
@@ -1280,11 +1317,6 @@ namespace AiUsageWidget
             const int WM_NCRBUTTONUP = 0x00A5;
             const int WM_CONTEXTMENU = 0x007B;
             if (m.Msg == WM_NCLBUTTONDBLCLK) return;
-            if (m.Msg == Program.ShowMessageId)
-            {
-                ShowAndActivate();   // a second launch asks the running widget to show itself
-                return;
-            }
             if (m.Msg == WM_DPICHANGED)
             {
                 HandleDpiChanged(m);

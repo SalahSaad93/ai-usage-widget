@@ -3,6 +3,26 @@
 All notable changes to this project are documented in this file. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.4.1] - 2026-11-14
+
+### Added
+
+- "Send test notification" in Settings, and `AiUsageWidget.exe --test-notification`, to check
+  that Windows lets the tray notification through (Do Not Disturb hides it).
+- The Gemini CLI suggestion now says why there is no provider: its terms do not allow other apps
+  to use its sign-in.
+
+### Fixed
+
+- Starting the widget a second time now really shows the running one. The request was sent as a
+  broadcast window message, which never reaches the widget's window; it is a named event now.
+- The first-run window no longer clips long descriptions.
+
+### Changed
+
+- The tests are a separate `AiUsageWidget.Tests.exe`; no test code ships in the widget. Project
+  files for IDEs and `dotnet build` were added.
+
 ## [0.4.0] - 2026-11-14
 
 ### Added

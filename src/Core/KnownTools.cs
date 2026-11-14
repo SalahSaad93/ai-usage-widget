@@ -94,6 +94,9 @@ namespace AiUsageWidget.Core
             if (toolId == "cursor" || toolId == "github-copilot")
                 return "Experimental: enable under Subscriptions";
             if (toolId == "antigravity") return "Install the agy CLI and sign in to see usage";
+            // Gemini CLI's terms prohibit third-party software from using its login, and it
+            // has no command that prints quota, so there is deliberately no provider.
+            if (toolId == "gemini-cli") return "Not supported: Google does not allow other apps to use this sign-in";
             return null;
         }
 

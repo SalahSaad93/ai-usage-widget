@@ -69,6 +69,10 @@ namespace AiUsageWidget
         bool keyPlaceholderShowing;
         bool clearKeyRequested;
 
+        // Set by the widget: shows a sample tray notification so the user can see what one
+        // looks like and whether Windows lets it through.
+        public Action TestNotification;
+
         public SettingsForm(Settings settings, IList<IUsageProvider> providers)
         {
             target = settings;
@@ -583,6 +587,16 @@ namespace AiUsageWidget
             resetBox.Text = "Also notify when a limit resets";
             resetBox.AutoSize = true;
             AddSpan(grid, resetBox);
+
+            var testButton = new Button();
+            testButton.Text = "Send test notification";
+            testButton.AutoSize = true;
+            testButton.Click += delegate
+            {
+                Action send = TestNotification;
+                if (send != null) send();
+            };
+            AddSpan(grid, testButton);
 
             return Titled("Notifications", grid);
         }

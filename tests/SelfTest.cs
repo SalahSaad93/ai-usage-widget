@@ -1278,7 +1278,7 @@ namespace AiUsageWidget
 
             That(KnownTools.HelpText("antigravity") == "Install the agy CLI and sign in to see usage",
                 "tray help line");
-            That(KnownTools.HelpText("gemini-cli") == null, "no help line for other tools");
+            That(KnownTools.HelpText("grok-build") == null, "no help line for other tools");
         }
 
         // A Stale row's tag gains the snapshot's own message: "stale 42m · sign in needed:
@@ -2670,7 +2670,8 @@ namespace AiUsageWidget
                 "copilot help text");
             That(KnownTools.HelpText("antigravity") == "Install the agy CLI and sign in to see usage",
                 "antigravity help unchanged");
-            That(KnownTools.HelpText("gemini-cli") == null, "other tools keep no help line");
+            That(KnownTools.HelpText("grok-build") == null, "other tools keep no help line");
+            That(KnownTools.HelpText("gemini-cli").StartsWith("Not supported"), "Gemini CLI explains why it has no provider");
         }
 
         // --- UX-pass checks --------------------------------------------------------------

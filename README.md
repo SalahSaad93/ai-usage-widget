@@ -31,6 +31,9 @@ auto-detection — you enable them explicitly. The Claude Code, Codex, Cursor an
 endpoints are unofficial and may stop working or be disallowed by the vendor — see
 [PRIVACY.md](PRIVACY.md).
 
+**Gemini CLI is deliberately not supported.** Its terms prohibit third-party software from using
+its sign-in, and it has no command that prints quota. The widget only tells you it found it.
+
 ## Features
 
 - **Two layouts**: Detailed (one card per tool, a bar per window with the percent and reset time)

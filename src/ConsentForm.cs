@@ -67,7 +67,7 @@ namespace AiUsageWidget
             list.AutoSize = true;
             list.ColumnCount = 1;
             foreach (ConsentRow row in rows)
-                boxes.Add(AddProviderRow(list, row, wrapWidth));
+                boxes.Add(AddProviderRow(list, row, wrapWidth - 60 * DeviceDpi / 96));
 
             var scroll = new Panel();
             scroll.AutoScroll = true;

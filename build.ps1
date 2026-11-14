@@ -32,6 +32,7 @@ using System.Reflection;
 [assembly: AssemblyCulture("")]
 [assembly: AssemblyVersion("$Version.0")]
 [assembly: AssemblyFileVersion("$Version.0")]
+[assembly: System.Runtime.CompilerServices.InternalsVisibleTo("AiUsageWidget.Tests")]
 "@ | Set-Content -Path $asmInfo -Encoding ASCII
 
 $csc = Join-Path $env:WINDIR "Microsoft.NET\Framework64\v4.0.30319\csc.exe"
@@ -88,10 +89,38 @@ if ($LASTEXITCODE -ne 0) {
     exit 1
 }
 
-# The exe is a winexe (no stdout), so the self-test writes its log and we read the file.
+# The tests are a separate exe that references the widget, so no test code ships.
+$testExe = Join-Path $bin "AiUsageWidget.Tests.exe"
+$testSources = Get-ChildItem -Path (Join-Path $root "tests") -Filter *.cs |
+    Sort-Object FullName |
+    ForEach-Object { $_.FullName }
+$testArgs = @(
+    "/nologo",
+    "/noconfig",
+    "/langversion:5",
+    "/warnaserror+",
+    "/target:exe",
+    "/platform:anycpu",
+    "/codepage:65001",
+    "/out:$testExe",
+    "/r:$exe",
+    "/r:System.dll",
+    "/r:System.Core.dll",
+    "/r:System.Drawing.dll",
+    "/r:System.Windows.Forms.dll",
+    "/r:System.Net.Http.dll",
+    "/r:System.Web.Extensions.dll",
+    "/r:System.Security.dll"
+) + @($testSources)
+& $csc @testArgs
+if ($LASTEXITCODE -ne 0) {
+    Write-Error "test compile failed with exit code $LASTEXITCODE"
+    exit 1
+}
+
 if (Test-Path $log) { Remove-Item $log -Force }
-$selfTest = Start-Process -FilePath $exe `
-    -ArgumentList @("--selftest", "--selftest-out", "`"$log`"") `
+$selfTest = Start-Process -FilePath $testExe `
+    -ArgumentList @("--out", "`"$log`"") `
     -Wait -PassThru -WindowStyle Hidden
 if ($selfTest.ExitCode -ne 0) {
     if (Test-Path $log) { Get-Content $log | Write-Host }

@@ -5,6 +5,7 @@ on:
   pull_request:
 
 jobs:
+  # The release build: the in-box C# compiler, nothing but Windows.
   build:
     runs-on: windows-latest
     steps:
@@ -22,3 +23,24 @@ jobs:
           path: |
             bin/AiUsageWidget.exe
             bin/selftest.log
+
+  # The project files used by IDEs must keep building the same sources.
+  sdk-build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build with the .NET SDK
+        run: dotnet build tests/AiUsageWidget.Tests.csproj -c Release
+
+      - name: Run self-tests
+        run: bin\sdk\AiUsageWidget.Tests.exe --out bin\sdk\selftest.log
+        shell: cmd
+
+      - name: Upload log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sdk-selftest-log
+          path: bin/sdk/selftest.log

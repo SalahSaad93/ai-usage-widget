@@ -13,7 +13,10 @@ This compiles with the in-box C# compiler, writes `bin\AiUsageWidget.exe`, then 
 self-test. Success prints `build OK: N selftest checks passed`; any failure is listed in
 `bin\selftest.log` and fails the build. To run the self-tests alone:
 
-    bin\AiUsageWidget.exe --selftest --selftest-out selftest.log
+    bin\AiUsageWidget.Tests.exe --out selftest.log
+
+The tests are a separate exe (`tests\*.cs`) that references the widget, so no test code ships.
+`bin\AiUsageWidget.Tests.exe --screenshots <folder>` renders every window with sample data.
 
 (The exe is a windowed executable with no console output, hence the log file. A non-zero exit code
 means at least one check failed.) While an installed widget is running from `bin\`, build into
@@ -46,7 +49,7 @@ New providers also register in `ProviderRegistry.All` (the array order is the ro
 experimental provider — one whose endpoint is unofficial or whose mapping is not yet verified
 against live output — also goes in `ProviderRegistry.ExperimentalIds`, which keeps it hidden
 until the user explicitly enables it. The full recipe is section 15 of `docs/DESIGN.md`; add new
-self-test checks at the end of `SelfTest.cs`.
+self-test checks at the end of `tests\SelfTest.cs`.
 
 ## Releases
 

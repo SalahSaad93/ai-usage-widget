@@ -27,20 +27,20 @@ After each completed refresh the widget trims its working set (`GC.Collect` plus
 ## 2. Source layout
 
 ```
-build.ps1            -Version x.y.z [-OutDir dir] [-Run]; writes AssemblyInfo, csc /warnaserror+, runs --selftest
+build.ps1            -Version x.y.z [-OutDir dir] [-Run]; writes AssemblyInfo, csc /warnaserror+, builds and runs the tests exe
 release.ps1          -Version x.y.z; build + sha256 + signed latest.json + gh release create; needs the signing key
 app.manifest         per-monitor DPI aware (PerMonitorV2), asInvoker, Windows 10+ supportedOS
 assets/app.ico       exe and tray icon (embedded as a named resource)
 assets/make-icons.ps1  regenerates the icon set
 tools/new-update-key.ps1  generates the RSA update-signing key pair
 src/
-  Program.cs         entry point: single-instance mutex, exception handlers, --selftest, --updated
+  Program.cs         entry point: single-instance mutex, exception handlers, --updated
   WidgetForm.cs      the window: paint, hit-testing, drag/resize, menus, tray, timers, detection
   Painter.cs         drawing and hit-testing for both layouts, row/view-model building
   Theme.cs           dark and light colour palettes
   SettingsForm.cs    the settings window (pure value copy-in/copy-out, self-tested)
   ConsentForm.cs     the first-run window (pure row plan, self-tested); shared row drawing
-  SelfTest.cs        all headless checks
+  (tests live in tests\: SelfTest.cs, Screenshots.cs, TestProgram.cs -> AiUsageWidget.Tests.exe)
   Core/
     UsageSnapshot.cs     data contract (UsageSnapshot, UsageWindow, WindowKind, ProviderStatus)
     IUsageProvider.cs    provider interface
@@ -609,7 +609,7 @@ on an unsigned build (an empty `UpdateKey.PublicKeyXml` — checks report "updat
 
 ## 14. Self-tests and the build
 
-`AiUsageWidget.exe --selftest [--selftest-out <file>]` runs headless with `AI_USAGE_WIDGET_DATA`
+`AiUsageWidget.Tests.exe [--out <file>]` (a separate exe that references the widget, so no test code ships; `--screenshots <dir>` renders every window with sample data) runs headless with `AI_USAGE_WIDGET_DATA`
 pointed at a fresh temp folder and makes no network calls (providers are pointed at temp files,
 fake runners keep real processes out). It prints one `PASS <name>` or `FAIL <name>: <reason>` line
 per check and exits non-zero on any failure; the exe is a windowed executable, hence the optional

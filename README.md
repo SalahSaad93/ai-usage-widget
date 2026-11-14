@@ -7,7 +7,9 @@ already keeps on your PC — or runs the vendor's own CLI — calls that vendor'
 draws the result in one small borderless window. It is WinForms on .NET Framework 4.8, fully
 custom-drawn, a single exe with no installer and nothing else to install.
 
-<!-- Screenshot placeholder: ![AI Usage Widget](docs/screenshot.png) — to be added -->
+![AI Usage Widget, dark theme](docs/screenshot.png) ![AI Usage Widget, light theme](docs/screenshot-light.png)
+
+(Sample data, rendered with `bin\AiUsageWidget.Tests.exe --screenshots <folder>`.)
 
 ## Supported subscriptions
 

@@ -1,7 +1,7 @@
 # Version manifest for the winget-pkgs repository (microsoft/winget-pkgs).
 # Submit with: wingetcreate submit packaging\winget  (or open a pull request by hand).
 PackageIdentifier: SalahSaad93.AiUsageWidget
-PackageVersion: 0.4.0
+PackageVersion: 0.4.1
 DefaultLocale: en-US
 ManifestType: version
 ManifestVersion: 1.6.0

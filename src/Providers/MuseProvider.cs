@@ -44,10 +44,11 @@ namespace AiUsageWidget.Providers
         public string Id { get { return "muse"; } }
         public string DisplayName { get { return "Muse"; } }
 
-        // Detected when muse.exe/.cmd/.bat sits in a PATH folder (spec section 13).
+        // Detected when muse.exe/.cmd/.bat sits in a PATH folder (spec section 13). The PATH
+        // is read fresh (registry + process) so a CLI installed after launch is still found.
         public bool IsDetected()
         {
-            string pathValue = pathOverride ?? Environment.GetEnvironmentVariable("PATH");
+            string pathValue = pathOverride ?? Detection.CurrentPath();
             return Detection.OnPath(pathValue, "muse.exe")
                 || Detection.OnPath(pathValue, "muse.cmd")
                 || Detection.OnPath(pathValue, "muse.bat");
@@ -79,13 +80,14 @@ namespace AiUsageWidget.Providers
         }
 
         // cmd.exe /c muse usage --json through the shared hidden-process runner (spec section
-        // 14 moved the process code into Core.CliProcess; the states below are unchanged —
-        // the timeout still surfaces as ExitCode -1 with the same stderr text).
+        // 14 moved the process code into Core.CliProcess; the states below are unchanged).
+        // The token is handed to CliProcess.Run so a cancel kills the process tree; the
+        // timeout matches the refresh service's 15 s so its token is what fires.
         static Task<MuseCliResult> RunCli(CancellationToken ct)
         {
             return Task.Run<MuseCliResult>(delegate
             {
-                CliResult cli = CliProcess.Run("muse usage --json", TimeoutMs);
+                CliResult cli = CliProcess.Run("muse usage --json", TimeoutMs, ct);
                 var result = new MuseCliResult();
                 result.ExitCode = cli.ExitCode;
                 result.StdOut = cli.StdOut;

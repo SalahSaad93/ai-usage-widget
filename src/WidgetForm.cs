@@ -189,7 +189,7 @@ namespace AiUsageWidget
 
         string PathValue()
         {
-            return Environment.GetEnvironmentVariable("PATH");
+            return Detection.CurrentPath();   // fresh from the registry: finds CLIs installed after launch
         }
 
         string ToolName(string toolId)

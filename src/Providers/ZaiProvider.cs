@@ -49,13 +49,13 @@ namespace AiUsageWidget.Providers
             }
             catch (Exception ex)
             {
-                return Err(Short(ex.Message));
+                return Err(Short(ex));
             }
 
             if (resp.Status == 401 || resp.Status == 403)
                 return AuthRequired();
             if (resp.Status != 200)
-                return Err("HTTP " + resp.Status.ToString(CultureInfo.InvariantCulture));
+                return Err(Errors.StatusText(resp.Status));
             return Parse(resp.Text);
         }
 
@@ -242,11 +242,9 @@ namespace AiUsageWidget.Providers
             return s;
         }
 
-        static string Short(string message)
+        static string Short(Exception ex)
         {
-            if (string.IsNullOrEmpty(message)) return "network error";
-            if (message.Length > 60) message = message.Substring(0, 60);
-            return "error: " + message;
+            return "error: " + Errors.Describe(ex);
         }
     }
 }

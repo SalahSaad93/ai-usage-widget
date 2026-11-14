@@ -1,5 +1,7 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
+using Microsoft.Win32;
 
 namespace AiUsageWidget.Core
 {
@@ -46,6 +48,72 @@ namespace AiUsageWidget.Core
                 if (File.Exists(Path.Combine(dir, leafName))) return true;
             }
             return false;
+        }
+
+        // The PATH as it is now, not as it was at launch: machine PATH and user PATH read
+        // fresh from the registry (variables like %USERPROFILE% expanded), then the process
+        // PATH. Registry or expansion failures fall back to the process PATH.
+        public static string CurrentPath()
+        {
+            string machine = ReadPathValue(Registry.LocalMachine,
+                "SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Environment");
+            string user = ReadPathValue(Registry.CurrentUser, "Environment");
+            string process = Environment.GetEnvironmentVariable("PATH");
+
+            var segments = new List<string>();
+            if (!string.IsNullOrEmpty(machine))
+                foreach (string raw in machine.Split(';'))
+                {
+                    string dir = Expand(raw);
+                    if (dir.Length > 0) segments.Add(dir);
+                }
+            if (!string.IsNullOrEmpty(user))
+                foreach (string raw in user.Split(';'))
+                {
+                    string dir = Expand(raw);
+                    if (dir.Length > 0) segments.Add(dir);
+                }
+            if (string.IsNullOrEmpty(process)) process = "";
+            return segments.Count > 0 ? string.Join(";", segments.ToArray()) + ";" + process
+                : process;
+        }
+
+        static string Expand(string raw)
+        {
+            string dir = raw.Trim();
+            if (dir.Length == 0) return "";
+            try
+            {
+                return Environment.ExpandEnvironmentVariables(dir);
+            }
+            catch (ArgumentException)
+            {
+                return dir;   // malformed variable reference: keep the raw segment
+            }
+        }
+
+        static string ReadPathValue(RegistryKey root, string subKey)
+        {
+            try
+            {
+                using (RegistryKey key = root.OpenSubKey(subKey))
+                {
+                    if (key == null) return null;
+                    return key.GetValue("Path") as string;
+                }
+            }
+            catch (System.Security.SecurityException)
+            {
+                return null;   // any failure falls back to the process PATH
+            }
+            catch (IOException)
+            {
+                return null;
+            }
+            catch (ArgumentException)
+            {
+                return null;
+            }
         }
 
         // File contents for presence checks only ("does this entry have a key?"). Returns

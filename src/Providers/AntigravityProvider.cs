@@ -14,7 +14,7 @@ namespace AiUsageWidget.Providers
     // injectable so the self-test feeds fixture text and never starts a process.
     public sealed class AntigravityProvider : IUsageProvider
     {
-        const int TimeoutMs = 20000;
+        const int TimeoutMs = 15000;   // at or below the refresh service's 15 s, so its token fires
 
         readonly Func<CancellationToken, Task<CliResult>> runnerOverride;
         readonly string pathOverride;
@@ -37,7 +37,7 @@ namespace AiUsageWidget.Providers
         // there is no .antigravity folder probe here; the KnownTools suggestion covers that.
         public bool IsDetected()
         {
-            string pathValue = pathOverride ?? Environment.GetEnvironmentVariable("PATH");
+            string pathValue = pathOverride ?? Detection.CurrentPath();
             return Detection.OnPath(pathValue, "agy.exe")
                 || Detection.OnPath(pathValue, "agy.cmd")
                 || Detection.OnPath(pathValue, "agy.bat");
@@ -60,7 +60,7 @@ namespace AiUsageWidget.Providers
             }
             if (result == null) return Err("no output");
 
-            if (result.TimedOut) return Err("timeout after 20 s");
+            if (result.TimedOut) return Err("timeout after 15 s");
 
             // Exit code 9009 or cmd's "is not recognized" means agy is not installed.
             if (result.ExitCode == 9009 ||
@@ -73,17 +73,21 @@ namespace AiUsageWidget.Providers
 
         // cmd.exe /c agy -p /usage --output-format json through the shared hidden-process
         // runner (spec section 14: same design as the Muse provider, one implementation).
+        // The token is handed to CliProcess.Run so a cancel kills the process tree.
         static Task<CliResult> RunCli(CancellationToken ct)
         {
             return Task.Run<CliResult>(delegate
             {
-                return CliProcess.Run("agy -p /usage --output-format json", TimeoutMs);
+                return CliProcess.Run("agy -p /usage --output-format json", TimeoutMs, ct);
             }, ct);
         }
 
         // Pure: no I/O, no process, no clock beyond the caller's "now" (used only for
-        // reset_in_seconds). Spec section 14 state order: any non-zero exit or output that
-        // mentions login / sign in / auth is an auth problem, whatever the exit code.
+        // reset_in_seconds). Valid JSON with buckets and a zero exit is Ok whatever words the
+        // text happens to contain ("authenticated": true, an author field). Failing that, an
+        // auth signal is one of the explicit phrases below — the bare substring "auth" is not
+        // one. Anything else: non-zero exit is an Error with the first stderr line, exit 0
+        // with no buckets is "unexpected response".
         public static UsageSnapshot Parse(string json, int exitCode, string stderr,
             DateTime nowUtc)
         {
@@ -91,46 +95,84 @@ namespace AiUsageWidget.Providers
             snapshot.ProviderId = "antigravity";
             snapshot.DisplayName = "Antigravity";
 
-            if (exitCode != 0 || Mentions(json, "login") || Mentions(json, "sign in") ||
-                Mentions(json, "auth") || Mentions(stderr, "login") ||
-                Mentions(stderr, "sign in") || Mentions(stderr, "auth"))
+            if (exitCode == 0)
+            {
+                var root = Json.ParseObject(json);
+                if (root != null)
+                {
+                    snapshot.PlanName = Capital(Json.GetStr(root, "tier"));
+                    if (snapshot.PlanName.Length == 0)
+                        snapshot.PlanName = Capital(Json.GetStr(root, "plan"));
+
+                    var best = new Dictionary<WindowKind, UsageWindow>();
+                    Walk(root, "", nowUtc, best);
+
+                    var windows = new List<UsageWindow>();
+                    if (best.ContainsKey(WindowKind.FiveHour)) windows.Add(best[WindowKind.FiveHour]);
+                    if (best.ContainsKey(WindowKind.Weekly)) windows.Add(best[WindowKind.Weekly]);
+                    if (best.ContainsKey(WindowKind.Monthly)) windows.Add(best[WindowKind.Monthly]);
+
+                    if (windows.Count > 0)
+                    {
+                        snapshot.Windows = windows;
+                        snapshot.Status = ProviderStatus.Ok;
+                        return snapshot;
+                    }
+                }
+            }
+
+            if (HasAuthPhrase(json) || HasAuthPhrase(stderr))
             {
                 snapshot.Status = ProviderStatus.AuthRequired;
                 snapshot.Message = "sign in needed: run agy login";
                 return snapshot;
             }
 
-            var root = Json.ParseObject(json);
-            if (root == null)
+            if (exitCode != 0)
             {
                 snapshot.Status = ProviderStatus.Error;
-                snapshot.Message = "unexpected output";
+                string line = FirstLine(stderr);
+                snapshot.Message = line.Length > 0
+                    ? line
+                    : "exit code " + exitCode.ToString(CultureInfo.InvariantCulture);
                 return snapshot;
             }
 
-            snapshot.PlanName = Capital(Json.GetStr(root, "tier"));
-            if (snapshot.PlanName.Length == 0)
-                snapshot.PlanName = Capital(Json.GetStr(root, "plan"));
-
-            var best = new Dictionary<WindowKind, UsageWindow>();
-            Walk(root, "", nowUtc, best);
-
-            var windows = new List<UsageWindow>();
-            if (best.ContainsKey(WindowKind.FiveHour)) windows.Add(best[WindowKind.FiveHour]);
-            if (best.ContainsKey(WindowKind.Weekly)) windows.Add(best[WindowKind.Weekly]);
-            if (best.ContainsKey(WindowKind.Monthly)) windows.Add(best[WindowKind.Monthly]);
-
-            snapshot.Windows = windows;
-            if (windows.Count == 0)
-            {
-                snapshot.Status = ProviderStatus.Error;
-                snapshot.Message = "unexpected response";
-            }
-            else
-            {
-                snapshot.Status = ProviderStatus.Ok;
-            }
+            snapshot.Status = ProviderStatus.Error;
+            snapshot.Message = "unexpected response";
             return snapshot;
+        }
+
+        // The explicit auth signals (spec change: any "auth" substring was far too loose).
+        static readonly string[] AuthPhrases =
+        {
+            "not logged in", "not signed in", "sign in", "log in", "login required",
+            "unauthenticated", "unauthorized", "401"
+        };
+
+        static bool HasAuthPhrase(string text)
+        {
+            if (string.IsNullOrEmpty(text)) return false;
+            string lower = text.ToLowerInvariant();
+            foreach (string phrase in AuthPhrases)
+                if (lower.Contains(phrase)) return true;
+            return false;
+        }
+
+        // The first non-empty stderr line, cut to 60 characters.
+        static string FirstLine(string stderr)
+        {
+            if (string.IsNullOrEmpty(stderr)) return "";
+            foreach (string raw in stderr.Split('\n'))
+            {
+                string line = raw.Trim();
+                if (line.Length > 0)
+                {
+                    if (line.Length > 60) line = line.Substring(0, 60);
+                    return line;
+                }
+            }
+            return "";
         }
 
         // The JSON shape has never been observed (spec section 14), so the walk is tolerant:

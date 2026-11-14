@@ -241,6 +241,8 @@ namespace AiUsageWidget.Core
         // Section 13's shown/hidden rule, pure: registry order in, ordered shown list out.
         // Listed-and-enabled shows always (detected or not); listed-disabled hides; unlisted
         // shows when autoDetect is off (the pre-detection behaviour) or when detected.
+        // Unlisted experimental providers (ProviderRegistry.ExperimentalIds) never show,
+        // whatever autoDetect and detection say.
         public static List<IUsageProvider> SelectShown(IUsageProvider[] registered,
             List<ProviderSetting> entries, bool autoDetect, Func<string, bool> isDetected)
         {
@@ -259,6 +261,7 @@ namespace AiUsageWidget.Core
             foreach (IUsageProvider p in registered)
             {
                 if (listed.Contains(p.Id)) continue;
+                if (Array.IndexOf(ProviderRegistry.ExperimentalIds, p.Id) >= 0) continue;
                 if (autoDetect && isDetected != null && !isDetected(p.Id)) continue;
                 list.Add(p);
             }

@@ -58,6 +58,9 @@ namespace AiUsageWidget
             Check(lines, "antigravity_tolerant_shapes", AntigravityTolerantShapes);
             Check(lines, "antigravity_cli_states", AntigravityCliStates);
             Check(lines, "antigravity_detection_and_suggestion", AntigravityDetectionAndSuggestion);
+            Check(lines, "errors_describe", ErrorsDescribe);
+            Check(lines, "offline_does_not_back_off", OfflineDoesNotBackOff);
+            Check(lines, "auth_required_keeps_last_good", AuthRequiredKeepsLastGood);
 
             string[] all = lines.ToArray();
             if (!string.IsNullOrEmpty(outPath)) File.WriteAllLines(outPath, all, new UTF8Encoding(false)); // no BOM: the log must start with PASS
@@ -248,7 +251,8 @@ namespace AiUsageWidget
             provider.Status = ProviderStatus.Ok;
 
             RefreshService svc = new RefreshService(
-                new IUsageProvider[] { provider }, clock.UtcNow, cachePath);
+                new IUsageProvider[] { provider }, clock.UtcNow, cachePath,
+                delegate() { return true; });   // pinned online: the check owns the network state
             svc.RunOnceAsync(false).GetAwaiter().GetResult();
 
             That(svc.Snapshots.Count == 1 && svc.Snapshots[0].Status == ProviderStatus.Ok,
@@ -307,7 +311,8 @@ namespace AiUsageWidget
             provider2.Message = "down";
             string cachePath2 = Path.Combine(AppPaths.DataDir, "cache-stale2.json");
             RefreshService svc2 = new RefreshService(
-                new IUsageProvider[] { provider2 }, clock2.UtcNow, cachePath2);
+                new IUsageProvider[] { provider2 }, clock2.UtcNow, cachePath2,
+                delegate() { return true; });
             svc2.RunOnceAsync(false).GetAwaiter().GetResult();
             That(svc2.Snapshots[0].Status == ProviderStatus.Error, "Error shown without previous good data");
             That(svc2.Snapshots[0].Message == "down", "Error keeps its message");
@@ -378,32 +383,36 @@ namespace AiUsageWidget
             IUsageProvider[] registry = ProviderRegistry.All;
             string path = Path.Combine(AppPaths.DataDir, "settings-order.json");
 
-            // No settings at all: every provider, enabled, in registry order.
+            // No settings at all: every provider, enabled, in registry order — except the
+            // experimental one (antigravity), which is never shown automatically.
             Settings s = Settings.Load(path);
             List<IUsageProvider> merged = s.MergeProviders(registry);
-            That(merged.Count == registry.Length, "empty settings -> every provider");
-            for (int i = 0; i < registry.Length; i++)
-                That(merged[i].Id == registry[i].Id,
-                    "registry order at " + i + ", got " + merged[i].Id);
+            That(merged.Count == registry.Length - 1,
+                "empty settings -> every non-experimental provider, got " + merged.Count);
+            for (int i = 0; i < merged.Count; i++)
+                That(merged[i].Id != "antigravity", "experimental provider never auto-shown");
             That(merged[0].Id == "claude-code", "default first provider is claude-code");
+            That(merged[1].Id == "codex" && merged[2].Id == "zai" &&
+                merged[3].Id == "opencode-go" && merged[4].Id == "muse",
+                "registry order kept around the skipped experimental");
 
             // The one legacy shape: exactly [{"id":"codex","enabled":true}] -> treated as empty.
             File.WriteAllText(path, "{\"providers\":[{\"id\":\"codex\",\"enabled\":true}]}");
             s = Settings.Load(path);
             merged = s.MergeProviders(registry);
-            That(merged.Count == registry.Length && merged[0].Id == "claude-code",
+            That(merged.Count == registry.Length - 1 && merged[0].Id == "claude-code",
                 "old default [codex] behaves as empty");
 
             // An explicit list controls order and enablement; unnamed ids append enabled in
-            // registry order.
+            // registry order (the experimental one still only by explicit entry).
             File.WriteAllText(path, "{\"providers\":[{\"id\":\"zai\",\"enabled\":true}," +
                 "{\"id\":\"codex\",\"enabled\":false}]}");
             s = Settings.Load(path);
             merged = s.MergeProviders(registry);
-            That(merged.Count == registry.Length - 1, "disabled codex dropped, got " + merged.Count);
+            That(merged.Count == registry.Length - 2, "disabled codex dropped, got " + merged.Count);
             That(merged[0].Id == "zai", "explicit list puts zai first");
-            That(merged[1].Id == "claude-code" && merged[2].Id == "antigravity" &&
-                merged[3].Id == "opencode-go" && merged[4].Id == "muse",
+            That(merged[1].Id == "claude-code" && merged[2].Id == "opencode-go" &&
+                merged[3].Id == "muse",
                 "unnamed providers append in registry order");
 
             // Saving untouched defaults must not write the merged list back: a later load
@@ -416,7 +425,7 @@ namespace AiUsageWidget
                 "save writes no merged provider ids, got " + saved);
             s = Settings.Load(freshPath);
             merged = s.MergeProviders(registry);
-            That(merged.Count == registry.Length && merged[0].Id == "claude-code",
+            That(merged.Count == registry.Length - 1 && merged[0].Id == "claude-code",
                 "saved empty list keeps registry order");
         }
 
@@ -918,6 +927,39 @@ namespace AiUsageWidget
             shown = Settings.SelectShown(registry, new List<ProviderSetting>(), true, claudeDetected);
             That(shown.Count == 1 && shown[0].Id == "claude-code",
                 "empty list -> detected only, registry order");
+
+            // Experimental providers (ProviderRegistry.ExperimentalIds) never show when
+            // unlisted, whatever autoDetect and detection say; an explicit enabled entry
+            // still shows one.
+            var experimentalRegistry = new IUsageProvider[]
+            {
+                new FakeProv("antigravity"), new FakeProv("codex")
+            };
+            Func<string, bool> everythingDetected = delegate(string id) { return true; };
+
+            shown = Settings.SelectShown(experimentalRegistry, new List<ProviderSetting>(),
+                true, everythingDetected);
+            That(shown.Count == 1 && shown[0].Id == "codex",
+                "unlisted experimental hidden even when detected, got " + shown.Count);
+
+            shown = Settings.SelectShown(experimentalRegistry, new List<ProviderSetting>(),
+                false, everythingDetected);
+            That(shown.Count == 1 && shown[0].Id == "codex",
+                "unlisted experimental hidden with autoDetect off too");
+
+            var experimentalListed = new List<ProviderSetting>();
+            experimentalListed.Add(new ProviderSetting { Id = "antigravity", Enabled = true });
+            shown = Settings.SelectShown(experimentalRegistry, experimentalListed, true,
+                everythingDetected);
+            That(shown.Count == 2 && shown[0].Id == "antigravity" && shown[1].Id == "codex",
+                "listed enabled still shows the experimental provider");
+
+            var experimentalDisabled = new List<ProviderSetting>();
+            experimentalDisabled.Add(new ProviderSetting { Id = "antigravity", Enabled = false });
+            shown = Settings.SelectShown(experimentalRegistry, experimentalDisabled, true,
+                everythingDetected);
+            That(shown.Count == 1 && shown[0].Id == "codex",
+                "listed disabled experimental hidden");
         }
 
         static List<string> DetectedToolIds(string profile, string local, string pathValue)
@@ -1088,23 +1130,41 @@ namespace AiUsageWidget
 
             s = AgyReturning(1, null, "please sign in first")
                 .FetchAsync(CancellationToken.None).GetAwaiter().GetResult();
-            That(s.Status == ProviderStatus.AuthRequired, "login failure -> AuthRequired");
+            That(s.Status == ProviderStatus.AuthRequired, "explicit phrase on failure -> AuthRequired");
             That(s.Message == "sign in needed: run agy login", "login message");
 
-            s = AgyReturning(3, null, "boom")
+            // A non-zero exit with unrelated stderr: Error with the first stderr line,
+            // not auth (the old rule turned any failure into "sign in needed").
+            s = AgyReturning(3, null, "boom\r\nstack trace")
                 .FetchAsync(CancellationToken.None).GetAwaiter().GetResult();
-            That(s.Status == ProviderStatus.AuthRequired, "any non-zero exit -> AuthRequired");
+            That(s.Status == ProviderStatus.Error, "unrelated failure -> Error");
+            That(s.Message == "boom", "first non-empty stderr line, got '" + s.Message + "'");
 
-            s = AgyReturning(0, "login at https://portal.example", "")
+            // "authenticated": true in valid buckets with exit 0: Ok despite the word
+            // ("auth" alone is never a signal).
+            s = AgyReturning(0, "{\"authenticated\":true,\"usage\":{\"five_hour\":" +
+                "{\"remaining_fraction\":0.5}}}", "")
                 .FetchAsync(CancellationToken.None).GetAwaiter().GetResult();
-            That(s.Status == ProviderStatus.AuthRequired, "auth mention on success -> AuthRequired");
+            That(s.Status == ProviderStatus.Ok, "'authenticated': true with buckets -> Ok, got " + s.Status);
+            That(s.Windows.Count == 1, "the bucket still maps to a window");
+
+            // An "author" field with no buckets is not auth either: unexpected response.
+            s = AgyReturning(0, "{\"author\":\"someone\"}", "")
+                .FetchAsync(CancellationToken.None).GetAwaiter().GetResult();
+            That(s.Status == ProviderStatus.Error && s.Message == "unexpected response",
+                "no buckets on exit 0 -> unexpected response, got '" + s.Message + "'");
+
+            // An explicit phrase on success with no buckets: still an auth problem.
+            s = AgyReturning(0, "please log in at https://portal.example", "")
+                .FetchAsync(CancellationToken.None).GetAwaiter().GetResult();
+            That(s.Status == ProviderStatus.AuthRequired, "explicit phrase on success -> AuthRequired");
 
             s = new AntigravityProvider(delegate(CancellationToken ct)
             {
                 var r = new CliResult();
                 r.ExitCode = -1;
                 r.TimedOut = true;
-                r.StdErr = "timeout after 20 s";
+                r.StdErr = "timeout after 15 s";
                 return Task.FromResult(r);
             }, null).FetchAsync(CancellationToken.None).GetAwaiter().GetResult();
             That(s.Status == ProviderStatus.Error, "timeout -> Error");
@@ -1156,6 +1216,163 @@ namespace AiUsageWidget
             That(KnownTools.HelpText("antigravity") == "Install the agy CLI and sign in to see usage",
                 "tray help line");
             That(KnownTools.HelpText("cursor") == null, "no help line for other tools");
+        }
+
+        // --- v0.3.2 checks ---------------------------------------------------------------
+
+        static void ErrorsDescribe()
+        {
+            That(Errors.Describe(new System.Net.Http.HttpRequestException(
+                "An error occurred while sending the request",
+                new System.Net.WebException("The remote name could not be resolved",
+                    System.Net.WebExceptionStatus.NameResolutionFailure)))
+                == "can't reach server", "name resolution reads as can't reach server");
+
+            That(Errors.Describe(new System.Net.Http.HttpRequestException(
+                "An error occurred while sending the request",
+                new System.Net.WebException("could not connect",
+                    System.Net.WebExceptionStatus.ConnectFailure)))
+                == "can't reach server", "connect failure reads as can't reach server");
+
+            That(Errors.Describe(new System.Net.Http.HttpRequestException("send failed",
+                new System.Net.Sockets.SocketException(10061)))
+                == "can't reach server", "connection refused reads as can't reach server");
+
+            That(Errors.Describe(new System.Net.Http.HttpRequestException("send failed",
+                new System.Security.Authentication.AuthenticationException("TLS handshake failed")))
+                == "secure connection failed", "TLS exception reads as secure connection failed");
+
+            That(Errors.Describe(new System.Net.Http.HttpRequestException("send failed",
+                new System.Net.WebException("chain broken",
+                    System.Net.WebExceptionStatus.SecureChannelFailure)))
+                == "secure connection failed", "SecureChannelFailure reads the same");
+
+            // Anything else: the innermost message, cut to 60 characters.
+            string longMessage = new string('x', 100);
+            That(Errors.Describe(new System.Net.Http.HttpRequestException(
+                "An error occurred while sending the request",
+                new InvalidOperationException(longMessage))) == longMessage.Substring(0, 60),
+                "innermost message cut to 60");
+
+            That(Errors.Describe(new System.Net.Http.HttpRequestException(
+                "An error occurred while sending the request"))
+                == "An error occurred while sending the request",
+                "no inner -> the exception's own message");
+        }
+
+        static void OfflineDoesNotBackOff()
+        {
+            DateTime t0 = new DateTime(2026, 3, 1, 9, 0, 0, DateTimeKind.Utc);
+            string cachePath = Path.Combine(AppPaths.DataDir, "cache-offline.json");
+            FakeClock clock = new FakeClock();
+            clock.Now = t0;
+            FakeProvider provider = new FakeProvider();
+            provider.Status = ProviderStatus.Ok;
+            bool networkUp = false;
+            Func<bool> isOnline = delegate() { return networkUp; };
+
+            RefreshService svc = new RefreshService(
+                new IUsageProvider[] { provider }, clock.UtcNow, cachePath, isOnline);
+            svc.RunOnceAsync(false).GetAwaiter().GetResult();
+            That(svc.Snapshots[0].Status == ProviderStatus.Ok, "first fetch is Ok");
+
+            provider.Status = ProviderStatus.Error;
+            provider.Message = "boom";
+            clock.Now = t0.AddMinutes(1);
+            svc.RunOnceAsync(false).GetAwaiter().GetResult();
+            That(svc.Snapshots[0].Status == ProviderStatus.Stale,
+                "offline error keeps last good as Stale");
+            That(svc.Snapshots[0].FetchedAtUtc == t0, "stale keeps the original fetch time");
+            That(!svc.IsSkipped("fake", clock.Now.AddSeconds(1)), "offline does not back off");
+
+            clock.Now = t0.AddMinutes(2);
+            svc.RunOnceAsync(false).GetAwaiter().GetResult();
+            That(provider.Calls == 3, "scheduled refresh still runs while offline");
+
+            // The network returns: the stale row is replaced by a fresh Ok.
+            networkUp = true;
+            provider.Status = ProviderStatus.Ok;
+            provider.Message = null;
+            clock.Now = t0.AddMinutes(3);
+            svc.RunOnceAsync(false).GetAwaiter().GetResult();
+            That(provider.Calls == 4, "fetch after reconnect");
+            That(svc.Snapshots[0].Status == ProviderStatus.Ok, "recovers to Ok when online");
+
+            // With no last-good data, offline shows an Error row saying "offline", no backoff.
+            FakeProvider provider2 = new FakeProvider();
+            provider2.Status = ProviderStatus.Error;
+            provider2.Message = "boom";
+            string cachePath2 = Path.Combine(AppPaths.DataDir, "cache-offline2.json");
+            RefreshService svc2 = new RefreshService(
+                new IUsageProvider[] { provider2 }, clock.UtcNow, cachePath2, isOnline);
+            networkUp = false;
+            clock.Now = t0.AddMinutes(4);
+            svc2.RunOnceAsync(false).GetAwaiter().GetResult();
+            That(svc2.Snapshots[0].Status == ProviderStatus.Error, "no last good -> Error row");
+            That(svc2.Snapshots[0].Message == "offline", "message is 'offline', got '"
+                + svc2.Snapshots[0].Message + "'");
+            That(!svc2.IsSkipped("fake", clock.Now.AddSeconds(1)),
+                "no backoff offline without last good either");
+            That(!File.Exists(cachePath2), "Error still not persisted");
+
+            networkUp = true;
+            provider2.Status = ProviderStatus.Ok;
+            provider2.Message = null;
+            clock.Now = t0.AddMinutes(5);
+            svc2.RunOnceAsync(false).GetAwaiter().GetResult();
+            That(svc2.Snapshots[0].Status == ProviderStatus.Ok, "reconnect replaces the offline row");
+        }
+
+        static void AuthRequiredKeepsLastGood()
+        {
+            DateTime t0 = new DateTime(2026, 2, 1, 8, 0, 0, DateTimeKind.Utc);
+            string cachePath = Path.Combine(AppPaths.DataDir, "cache-authkeep.json");
+            FakeClock clock = new FakeClock();
+            clock.Now = t0;
+            FakeProvider provider = new FakeProvider();
+            provider.Status = ProviderStatus.Ok;
+
+            RefreshService svc = new RefreshService(
+                new IUsageProvider[] { provider }, clock.UtcNow, cachePath);
+            svc.RunOnceAsync(false).GetAwaiter().GetResult();
+            That(svc.Snapshots[0].Status == ProviderStatus.Ok, "first fetch is Ok with windows");
+
+            // The login expires: the row must keep its last-known percentages.
+            provider.Status = ProviderStatus.AuthRequired;
+            provider.Message = "sign in needed: open Claude Code";
+            clock.Now = t0.AddMinutes(42);
+            svc.RunOnceAsync(false).GetAwaiter().GetResult();
+            That(svc.Snapshots[0].Status == ProviderStatus.Stale,
+                "auth keeps last good as Stale, got " + svc.Snapshots[0].Status);
+            That(svc.Snapshots[0].Message == "sign in needed: open Claude Code",
+                "auth message carried over, got '" + svc.Snapshots[0].Message + "'");
+            That(svc.Snapshots[0].FetchedAtUtc == t0, "FetchedAtUtc kept so the tag shows its age");
+            That(svc.Snapshots[0].Windows.Count == 1, "windows kept");
+            That(!svc.IsSkipped("fake", clock.Now.AddSeconds(1)), "auth does not back off");
+            That(File.Exists(cachePath), "persisted");
+
+            // A later Ok replaces the row and clears the message.
+            provider.Status = ProviderStatus.Ok;
+            provider.Message = null;
+            clock.Now = t0.AddMinutes(50);
+            svc.RunOnceAsync(false).GetAwaiter().GetResult();
+            That(svc.Snapshots[0].Status == ProviderStatus.Ok, "recovers to Ok");
+            That(string.IsNullOrEmpty(svc.Snapshots[0].Message), "a later Ok clears the message");
+            That(svc.Snapshots[0].FetchedAtUtc == t0.AddMinutes(50), "re-stamped with the new time");
+
+            // Without previous windows, behave as today: AuthRequired replaces the snapshot.
+            FakeClock clock2 = new FakeClock();
+            clock2.Now = t0;
+            FakeProvider fresh = new FakeProvider();
+            fresh.Status = ProviderStatus.AuthRequired;
+            fresh.Message = "sign in needed";
+            string cachePath2 = Path.Combine(AppPaths.DataDir, "cache-authkeep2.json");
+            RefreshService svc2 = new RefreshService(
+                new IUsageProvider[] { fresh }, clock2.UtcNow, cachePath2);
+            svc2.RunOnceAsync(false).GetAwaiter().GetResult();
+            That(svc2.Snapshots[0].Status == ProviderStatus.AuthRequired,
+                "no previous windows -> AuthRequired replaces, as today");
+            That(File.Exists(cachePath2), "AuthRequired is persisted as today");
         }
 
     }

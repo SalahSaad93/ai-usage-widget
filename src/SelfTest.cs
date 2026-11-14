@@ -73,6 +73,9 @@ namespace AiUsageWidget
             Check(lines, "painter_extended_rows_and_columns", PainterExtendedRowsAndColumns);
             Check(lines, "update_signature_verifies", UpdateSignatureVerifies);
             Check(lines, "unsigned_build_disables_updates", UnsignedBuildDisablesUpdates);
+            Check(lines, "theme_contrast", ThemeContrast);
+            Check(lines, "colour_thresholds_instance", ColourThresholdsInstance);
+            Check(lines, "hit_test_layouts", HitTestLayouts);
 
             string[] all = lines.ToArray();
             if (!string.IsNullOrEmpty(outPath)) File.WriteAllLines(outPath, all, new UTF8Encoding(false)); // no BOM: the log must start with PASS
@@ -1689,6 +1692,229 @@ namespace AiUsageWidget
             var updater = new Updater(cfg, "unused.exe", new Version(0, 1), "");
             updater.CheckAsync().GetAwaiter().GetResult();
             That(updater.StatusText == "updates disabled (unsigned build)", "unsigned status");
+        }
+
+        // --- UX-pass checks --------------------------------------------------------------
+
+        // WCAG 2.1 contrast of two colours.
+        static double WCAGContrast(Color a, Color b)
+        {
+            double la = RelativeLuminance(a), lb = RelativeLuminance(b);
+            double hi = Math.Max(la, lb), lo = Math.Min(la, lb);
+            return (hi + 0.05) / (lo + 0.05);
+        }
+
+        static double RelativeLuminance(Color c)
+        {
+            return 0.2126 * SrgbChannel(c.R) + 0.7152 * SrgbChannel(c.G) + 0.0722 * SrgbChannel(c.B);
+        }
+
+        static double SrgbChannel(int value)
+        {
+            double v = value / 255.0;
+            return v <= 0.03928 ? v / 12.92 : Math.Pow((v + 0.055) / 1.055, 2.4);
+        }
+
+        static void ThemeContrast()
+        {
+            // Dark keeps the palette the painter used to hard-code, colour for colour.
+            That(Theme.Dark.Background.ToArgb() == Color.FromArgb(30, 31, 34).ToArgb(), "dark background");
+            That(Theme.Dark.Card.ToArgb() == Color.FromArgb(38, 40, 44).ToArgb(), "dark card");
+            That(Theme.Dark.Line.ToArgb() == Color.FromArgb(58, 61, 68).ToArgb(), "dark line");
+            That(Theme.Dark.Text.ToArgb() == Color.FromArgb(230, 230, 230).ToArgb(), "dark text");
+            That(Theme.Dark.DimText.ToArgb() == Color.FromArgb(139, 143, 152).ToArgb(), "dark dim text");
+            That(Theme.Dark.Green.ToArgb() == Color.FromArgb(63, 185, 80).ToArgb(), "dark green");
+            That(Theme.Dark.Yellow.ToArgb() == Color.FromArgb(210, 153, 34).ToArgb(), "dark yellow");
+            That(Theme.Dark.Red.ToArgb() == Color.FromArgb(248, 81, 73).ToArgb(), "dark red");
+            That(Theme.Dark.Accent.ToArgb() == Color.FromArgb(76, 141, 255).ToArgb(), "dark accent");
+            That(Theme.Dark.ChipText.ToArgb() == Color.White.ToArgb(), "dark chip text");
+            That(Theme.Light.Background != Theme.Dark.Background, "the palettes differ");
+
+            CheckReadable("dark", Theme.Dark);
+            CheckReadable("light", Theme.Light);
+        }
+
+        static void CheckReadable(string which, Theme t)
+        {
+            That(WCAGContrast(t.Text, t.Background) >= 4.5, which + ": text on background >= 4.5, got "
+                + WCAGContrast(t.Text, t.Background).ToString("0.00", CultureInfo.InvariantCulture));
+            That(WCAGContrast(t.Text, t.Card) >= 4.5, which + ": text on card >= 4.5");
+            That(WCAGContrast(t.DimText, t.Background) >= 4.5, which + ": dim text on background >= 4.5, got "
+                + WCAGContrast(t.DimText, t.Background).ToString("0.00", CultureInfo.InvariantCulture));
+            That(WCAGContrast(t.DimText, t.Card) >= 4.5, which + ": dim text on card >= 4.5");
+            That(WCAGContrast(t.Green, t.Card) >= 3.0, which + ": green bar distinguishable from the card");
+            That(WCAGContrast(t.Yellow, t.Card) >= 3.0, which + ": yellow bar distinguishable from the card");
+            That(WCAGContrast(t.Red, t.Card) >= 3.0, which + ": red bar distinguishable from the card");
+        }
+
+        static void ColourThresholdsInstance()
+        {
+            using (Painter painter = new Painter(1f, Theme.Dark, 40, 80))
+            {
+                That(painter.ColorAt(39.9).ToArgb() == Theme.Dark.Green.ToArgb(),
+                    "39.9 below warn 40 -> green");
+                That(painter.ColorAt(40).ToArgb() == Theme.Dark.Yellow.ToArgb(),
+                    "40 at warn -> yellow");
+                That(painter.ColorAt(80).ToArgb() == Theme.Dark.Yellow.ToArgb(),
+                    "80 at critical is still yellow (inclusive)");
+                That(painter.ColorAt(80.1).ToArgb() == Theme.Dark.Red.ToArgb(),
+                    "80.1 above critical 80 -> red");
+            }
+            using (Painter painter = new Painter(1f, Theme.Light, 50, 70))
+            {
+                That(painter.ColorAt(49.9).ToArgb() == Theme.Light.Green.ToArgb(),
+                    "light palette below warn -> light green");
+                That(painter.ColorAt(90).ToArgb() == Theme.Light.Red.ToArgb(),
+                    "light palette above critical -> light red");
+            }
+            using (Painter painter = new Painter(1f))
+            {
+                That(painter.ColorAt(49.9).ToArgb() == Painter.ColorFor(49.9).ToArgb(),
+                    "default painter agrees with the static 50/70 rule below warn");
+                That(painter.ColorAt(70).ToArgb() == Painter.ColorFor(70).ToArgb(),
+                    "default painter agrees at critical");
+                That(painter.ColorAt(70.1).ToArgb() == Painter.ColorFor(70.1).ToArgb(),
+                    "default painter agrees above critical");
+            }
+        }
+
+        static void HitTestLayouts()
+        {
+            var snapshots = new List<UsageSnapshot>();
+            UsageSnapshot codex = SnapFor("codex", "Codex");
+            codex.PlanName = "Pro";
+            var five = new UsageWindow { Kind = WindowKind.FiveHour, Primary = true,
+                UsedPercent = 41.25, Used = 7, Limit = 100, Unit = "requests" };
+            five.ResetsAtUtc = EpochBase(2026, 11, 16, 21, 0);
+            codex.Windows.Add(five);
+            codex.Windows.Add(new UsageWindow { Kind = WindowKind.Weekly, Primary = true, UsedPercent = 9 });
+            UsageSnapshot claude = SnapFor("claude-code", "Claude Code");
+            claude.Status = ProviderStatus.AuthRequired;
+            claude.Message = "sign in needed: open Claude Code";
+            UsageSnapshot muse = SnapFor("muse", "Muse");
+            muse.Windows.Add(new UsageWindow { Kind = WindowKind.Weekly, Primary = true, UsedPercent = 63 });
+            snapshots.Add(codex);
+            snapshots.Add(claude);
+            snapshots.Add(muse);
+
+            var ids = new List<string>();
+            ids.Add("codex");
+            ids.Add("claude-code");
+            ids.Add("muse");
+            List<RowVm> rows = Painter.BuildRows(snapshots, DateTime.UtcNow, ids);
+            That(rows.Count == 3 && rows[0].Windows.Count == 2, "three rows, codex with two windows");
+            That(rows[0].Windows[0].ResetsAtUtc.HasValue && rows[0].Windows[0].Unit == "requests",
+                "tooltip fields carried onto the window VM");
+
+            using (Painter painter = new Painter(1f))
+            {
+                float w = 340;
+                float h = painter.HeaderHeight + painter.ContentHeight(0, rows) + painter.FooterHeight;
+                float row0 = painter.HeaderHeight + painter.S(2);
+                float row1 = row0 + painter.RowHeight(0, rows[0]);
+                float row2 = row1 + painter.RowHeight(0, rows[1]);
+
+                HitInfo hit = painter.HitTest(new Point((int)painter.S(30),
+                    (int)(row0 + painter.S(17))), w, h, 0, 0, rows);
+                That(hit.Kind == HitKind.RowTitle && hit.Row == 0 && hit.Window == -1,
+                    "detailed: row 0 title, got " + hit.Kind + " row " + hit.Row);
+
+                hit = painter.HitTest(new Point((int)painter.S(30),
+                    (int)(row0 + painter.S(35))), w, h, 0, 0, rows);
+                That(hit.Kind == HitKind.UsageWindow && hit.Row == 0 && hit.Window == 0,
+                    "detailed: row 0 usage line 0, got " + hit.Kind + " window " + hit.Window);
+
+                hit = painter.HitTest(new Point((int)(w - painter.S(30)),
+                    (int)(row0 + painter.S(54))), w, h, 0, 0, rows);
+                That(hit.Kind == HitKind.UsageWindow && hit.Row == 0 && hit.Window == 1,
+                    "detailed: row 0 usage line 1 across the whole width, got " + hit.Kind);
+
+                hit = painter.HitTest(new Point((int)painter.S(30),
+                    (int)(row1 + painter.S(17))), w, h, 0, 0, rows);
+                That(hit.Kind == HitKind.RowTitle && hit.Row == 1,
+                    "detailed: message row title, got " + hit.Kind + " row " + hit.Row);
+
+                hit = painter.HitTest(new Point((int)painter.S(30),
+                    (int)(row1 - painter.S(3))), w, h, 0, 0, rows);
+                That(hit.Kind == HitKind.None, "detailed: the gap between cards is no hit, got " + hit.Kind);
+
+                hit = painter.HitTest(new Point((int)painter.S(100), (int)painter.S(10)), w, h, 0, 0, rows);
+                That(hit.Kind == HitKind.None, "detailed: bare header area is no hit, got " + hit.Kind);
+
+                hit = Hit(painter, painter.MenuRect(w), w, h, 0, 0, rows);
+                That(hit.Kind == HitKind.MenuButton, "detailed: menu button, got " + hit.Kind);
+                hit = Hit(painter, painter.RefreshRect(w), w, h, 0, 0, rows);
+                That(hit.Kind == HitKind.RefreshButton, "detailed: refresh button, got " + hit.Kind);
+                hit = Hit(painter, painter.CloseRect(w), w, h, 0, 0, rows);
+                That(hit.Kind == HitKind.CloseButton, "detailed: close button, got " + hit.Kind);
+                hit = Hit(painter, painter.DetailedRect(w, h), w, h, 0, 0, rows);
+                That(hit.Kind == HitKind.DetailedChip, "detailed: detailed chip, got " + hit.Kind);
+                hit = Hit(painter, painter.CompactRect(w, h), w, h, 0, 0, rows);
+                That(hit.Kind == HitKind.CompactChip, "detailed: compact chip, got " + hit.Kind);
+
+                // Scrolled to the bottom in a too-short window, the lower rows' titles are
+                // where the shared scroll maths says they are.
+                float shortH = painter.HeaderHeight + painter.FooterHeight
+                    + painter.S(2) + painter.RowHeight(0, rows[0]) + painter.S(30);
+                int clamped = painter.ClampedScroll(w, shortH, 0, 100000, rows);
+                That(clamped > 0, "detailed: the short window scrolls");
+                hit = painter.HitTest(new Point((int)painter.S(30),
+                    (int)(row1 - clamped + painter.S(17))), w, shortH, 0, 100000, rows);
+                That(hit.Kind == HitKind.RowTitle && hit.Row == 1,
+                    "detailed: scrolled row 1 title, got " + hit.Kind + " row " + hit.Row);
+                hit = painter.HitTest(new Point((int)painter.S(30),
+                    (int)(row2 - clamped + painter.S(17))), w, shortH, 0, 100000, rows);
+                That(hit.Kind == HitKind.RowTitle && hit.Row == 2,
+                    "detailed: scrolled row 2 title, got " + hit.Kind + " row " + hit.Row);
+
+                float cw = painter.CompactWidthFor(rows);
+                float ch = painter.HeaderHeight + painter.ContentHeight(1, rows) + painter.FooterHeight;
+                float cols = painter.CompactColsLeft(cw, rows);
+                float c0 = painter.HeaderHeight + painter.CompactLabelBand();
+                float c1 = c0 + painter.CompactRowPitch();
+                float c2 = c1 + painter.CompactRowPitch();
+
+                hit = painter.HitTest(new Point((int)painter.S(20), (int)(c0 + painter.S(12))), cw, ch, 1, 0, rows);
+                That(hit.Kind == HitKind.RowTitle && hit.Row == 0, "compact: row 0 title, got " + hit.Kind);
+
+                hit = painter.HitTest(new Point((int)(painter.CompactColumnX(cols, 0) + painter.S(10)),
+                    (int)(c0 + painter.S(12))), cw, ch, 1, 0, rows);
+                That(hit.Kind == HitKind.UsageWindow && hit.Row == 0 && hit.Window == 0,
+                    "compact: codex five-hour cell, got " + hit.Kind + " window " + hit.Window);
+
+                hit = painter.HitTest(new Point((int)(painter.CompactColumnX(cols, 1) + painter.S(10)),
+                    (int)(c0 + painter.S(12))), cw, ch, 1, 0, rows);
+                That(hit.Kind == HitKind.UsageWindow && hit.Row == 0 && hit.Window == 1,
+                    "compact: codex weekly cell, got " + hit.Kind + " window " + hit.Window);
+
+                hit = painter.HitTest(new Point((int)painter.S(20), (int)(c1 + painter.S(12))), cw, ch, 1, 0, rows);
+                That(hit.Kind == HitKind.RowTitle && hit.Row == 1, "compact: row 1 title, got " + hit.Kind);
+
+                hit = painter.HitTest(new Point((int)(painter.CompactColumnX(cols, 0) + painter.S(10)),
+                    (int)(c1 + painter.S(12))), cw, ch, 1, 0, rows);
+                That(hit.Kind == HitKind.None, "compact: message row owns its band, no usage hit");
+
+                hit = painter.HitTest(new Point((int)(painter.CompactColumnX(cols, 0) + painter.S(10)),
+                    (int)(c2 + painter.S(12))), cw, ch, 1, 0, rows);
+                That(hit.Kind == HitKind.None, "compact: the em-dash placeholder cell is no hit, got " + hit.Kind);
+
+                hit = painter.HitTest(new Point((int)(painter.CompactColumnX(cols, 1) + painter.S(10)),
+                    (int)(c2 + painter.S(12))), cw, ch, 1, 0, rows);
+                That(hit.Kind == HitKind.UsageWindow && hit.Row == 2 && hit.Window == 0,
+                    "compact: muse weekly cell, got " + hit.Kind + " window " + hit.Window);
+
+                hit = painter.HitTest(new Point((int)painter.S(20),
+                    (int)(painter.HeaderHeight + painter.S(10))), cw, ch, 1, 0, rows);
+                That(hit.Kind == HitKind.None, "compact: bare header area is no hit, got " + hit.Kind);
+            }
+        }
+
+        // HitTest at the centre of a rect.
+        static HitInfo Hit(Painter painter, RectangleF r, float w, float h, int mode, int scroll,
+            List<RowVm> rows)
+        {
+            return painter.HitTest(new Point((int)(r.Left + r.Width / 2), (int)(r.Top + r.Height / 2)),
+                w, h, mode, scroll, rows);
         }
 
     }

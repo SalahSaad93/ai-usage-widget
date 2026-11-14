@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Drawing;
 using System.Globalization;
 using System.IO;
+using System.Net.NetworkInformation;
 using System.Threading.Tasks;
 using System.Windows.Forms;
 using Microsoft.Win32;
@@ -18,33 +19,45 @@ namespace AiUsageWidget
         readonly Settings settings;
         readonly RefreshService refresh;
         readonly Updater updater;
-        readonly Painter painter;
+        Painter painter;   // rebuilt on WM_DPICHANGED at the new scale
         readonly NotifyIcon tray = new NotifyIcon();
         readonly Timer refreshTimer = new Timer();
         readonly Timer minuteTimer = new Timer();
         readonly Timer updateTimer = new Timer();
+        readonly Timer noteTimer = new Timer();      // how long the "just refreshed" note stays up
+        readonly Timer resumeTimer = new Timer();    // delayed refresh after resume / network return
+        readonly IUsageProvider[] allProviders;   // ProviderRegistry.All allocates on every access
         List<IUsageProvider> activeProviders;   // recomputed at startup and at every refresh
         List<string> activeIds = new List<string>();   // ordered, as SelectShown returns them
         readonly Dictionary<string, IUsageProvider> allById = new Dictionary<string, IUsageProvider>();
+        readonly Dictionary<string, bool> detectionCache = new Dictionary<string, bool>();
         List<string> suggestions = new List<string>();   // detected tools with no provider
         readonly string versionText;
 
         int mode;          // 0 = detailed, 1 = compact
         int scroll;
+        int detailedWidth;   // last Detailed-mode width the user chose; default 340 scaled
         bool exitSignalled;
+        bool justRefreshed;        // header note after a throttled manual refresh
+        bool refreshWasBusy;       // to spot the Busy true->false edge in OnRefreshChanged
+        bool inDpiChange;          // WM_DPICHANGED can re-enter via its own bounds change
+        bool resumeRefreshPending; // coalesce resume/network events into one refresh
 
         public WidgetForm(string versionText)
         {
             this.versionText = versionText;
             settings = Settings.Load(AppPaths.SettingsPath);
-            foreach (IUsageProvider p in ProviderRegistry.All) allById[p.Id] = p;
-            activeProviders = Settings.SelectShown(ProviderRegistry.All, settings.Providers,
+            allProviders = ProviderRegistry.All;
+            foreach (IUsageProvider p in allProviders) allById[p.Id] = p;
+            RefreshDetection();
+            activeProviders = Settings.SelectShown(allProviders, settings.Providers,
                 settings.AutoDetect, IsProviderDetected);
             foreach (IUsageProvider p in activeProviders) activeIds.Add(p.Id);
             refresh = new RefreshService(activeProviders.ToArray(), UtcNow, AppPaths.CachePath);
             updater = new Updater(settings.Update, AppPaths.RunningExePath, new Version(versionText));
             using (Graphics g = CreateGraphics())
                 painter = new Painter(g.DpiX / 96f);
+            detailedWidth = (int)painter.S(340);
 
             mode = settings.Layout == "compact" ? 1 : 0;
 
@@ -62,12 +75,19 @@ namespace AiUsageWidget
             MinimumSize = new Size((int)painter.S(300), (int)painter.S(120));
 
             RestoreSavedBounds();
+            if (mode == 0) detailedWidth = ClientSize.Width;   // the saved width is the last chosen one
+            DedupKnownProviders();
             InitTray();
             suggestions = ComputeSuggestions();
             AnnounceNewSuggestions();
             AnnounceNewProviders();
             BuildMenu();
             InitTimers();
+
+            // Resume and network return can each leave data stale; both events arrive on
+            // other threads, so the handlers marshal onto the UI thread.
+            SystemEvents.PowerModeChanged += OnPowerModeChanged;
+            NetworkChange.NetworkAvailabilityChanged += OnNetworkAvailabilityChanged;
 
             refresh.Changed = OnRefreshChanged;
             updater.StateChanged = OnUpdaterChanged;
@@ -84,6 +104,8 @@ namespace AiUsageWidget
 
         void OnRefreshChanged()
         {
+            if (refreshWasBusy && !refresh.Busy) TrimMemory();   // once per completed refresh
+            refreshWasBusy = refresh.Busy;
             FitHeightToContent();
             Invalidate();
         }
@@ -117,10 +139,19 @@ namespace AiUsageWidget
 
         // --- auto-detection (spec section 13) -------------------------------------------
 
+        // Detection scans files and PATH, so it never runs on paint, menu rebuilds or
+        // suggestion lookups: start-up and RecomputeShown refresh this cache once per
+        // refresh and everything else reads it.
+        void RefreshDetection()
+        {
+            detectionCache.Clear();
+            foreach (IUsageProvider p in allProviders) detectionCache[p.Id] = p.IsDetected();
+        }
+
         bool IsProviderDetected(string id)
         {
-            IUsageProvider p;
-            return allById.TryGetValue(id, out p) && p.IsDetected();
+            bool detected;
+            return detectionCache.TryGetValue(id, out detected) && detected;
         }
 
         // Recomputes the shown set from the registry, the settings entries and detection;
@@ -128,7 +159,8 @@ namespace AiUsageWidget
         // refresh.
         void RecomputeShown()
         {
-            activeProviders = Settings.SelectShown(ProviderRegistry.All, settings.Providers,
+            RefreshDetection();
+            activeProviders = Settings.SelectShown(allProviders, settings.Providers,
                 settings.AutoDetect, IsProviderDetected);
             activeIds = new List<string>();
             foreach (IUsageProvider p in activeProviders) activeIds.Add(p.Id);
@@ -171,9 +203,9 @@ namespace AiUsageWidget
             return allById.TryGetValue(id, out p) ? p.DisplayName : id;
         }
 
-        // One balloon per provider that becomes shown: only for one that turns up while the
-        // widget runs, or that is new since the last saved state — never on the very first
-        // run (no settings file yet), where the ids are just seeded (spec section 13).
+        // One balloon for all providers that become shown: only for ones that turn up while
+        // the widget runs, or that are new since the last saved state — never on the very
+        // first run (no settings file yet), where the ids are just seeded (spec section 13).
         void AnnounceNewProviders()
         {
             var fresh = new List<string>();
@@ -181,40 +213,66 @@ namespace AiUsageWidget
                 if (!settings.KnownProviders.Contains(id)) fresh.Add(id);
             if (fresh.Count == 0) return;
             if (settings.HasFile)
-                foreach (string id in fresh)
-                    Balloon("Detected " + ProviderName(id) + ": added to the widget");
-            settings.KnownProviders.AddRange(activeIds);
+                Balloon("Detected " + NameList(fresh, ProviderName) + ": added to the widget");
+            settings.KnownProviders.AddRange(fresh);   // fresh ids only: the whole list would duplicate
             SaveSettings();
         }
 
-        // One balloon per known tool, ever: announcedSuggestions remembers what was said.
+        // One balloon for all known tools new since the last saved state, ever:
+        // announcedSuggestions remembers what was said.
         void AnnounceNewSuggestions()
         {
             var fresh = new List<string>();
             foreach (string id in suggestions)
                 if (!settings.AnnouncedSuggestions.Contains(id)) fresh.Add(id);
             if (fresh.Count == 0) return;
-            foreach (string id in fresh)
-                Balloon(ToolName(id) + " found on this PC: no usage support yet");
+            Balloon(NameList(fresh, ToolName) + " found on this PC: no usage support yet");
             settings.AnnouncedSuggestions.AddRange(fresh);
             SaveSettings();
         }
 
-        // A click in the Subscriptions submenu writes an explicit entry: flipped when one
-        // exists, added enabled when the provider was only auto-shown.
+        static string NameList(List<string> ids, Func<string, string> nameOf)
+        {
+            var names = new List<string>();
+            foreach (string id in ids) names.Add(nameOf(id));
+            return string.Join(", ", names.ToArray());
+        }
+
+        // Older settings files can carry duplicate knownProviders ids (the announcement used
+        // to add the whole active list on every run); drop them once so the file heals.
+        void DedupKnownProviders()
+        {
+            var seen = new HashSet<string>();
+            var unique = new List<string>();
+            foreach (string id in settings.KnownProviders)
+                if (seen.Add(id)) unique.Add(id);
+            if (unique.Count == settings.KnownProviders.Count) return;
+            settings.KnownProviders = unique;
+            SaveSettings();
+        }
+
+        // The toggle rule, pure: the new state is the opposite of whether the provider is
+        // shown right now, so hiding an auto-detected provider (shown, unlisted) writes one
+        // disabled entry on the first click instead of two.
+        public static void ApplyProviderToggle(List<ProviderSetting> entries, string id,
+            bool currentlyShown)
+        {
+            foreach (ProviderSetting ps in entries)
+            {
+                if (ps.Id != id) continue;
+                ps.Enabled = !currentlyShown;
+                return;
+            }
+            var added = new ProviderSetting();
+            added.Id = id;
+            added.Enabled = !currentlyShown;
+            entries.Add(added);
+        }
+
+        // A click in the Subscriptions submenu writes an explicit entry: the rule above.
         void ToggleProvider(string id)
         {
-            ProviderSetting entry = null;
-            foreach (ProviderSetting ps in settings.Providers)
-                if (ps.Id == id) { entry = ps; break; }
-            if (entry != null) entry.Enabled = !entry.Enabled;
-            else
-            {
-                var added = new ProviderSetting();
-                added.Id = id;
-                added.Enabled = true;
-                settings.Providers.Add(added);
-            }
+            ApplyProviderToggle(settings.Providers, id, activeIds.Contains(id));
             SaveSettings();
             RecomputeShown();
             BuildMenu();
@@ -280,7 +338,21 @@ namespace AiUsageWidget
             refreshTimer.Interval = settings.RefreshMinutes * 60000;
             refreshTimer.Tick += OnRefreshTimer;
             minuteTimer.Interval = 60000;   // re-render "updated ... ago", stale tags, reset times
-            minuteTimer.Tick += delegate { Invalidate(); TrimMemory(); };
+            minuteTimer.Tick += delegate { Invalidate(); };
+            noteTimer.Interval = 3000;   // "just refreshed" stays up about this long
+            noteTimer.Tick += delegate
+            {
+                noteTimer.Stop();
+                justRefreshed = false;
+                Invalidate();
+            };
+            resumeTimer.Interval = 5000;   // one refresh about 5 s after resume / network return
+            resumeTimer.Tick += delegate
+            {
+                resumeTimer.Stop();
+                resumeRefreshPending = false;
+                RunRefresh(false);
+            };
             updateTimer.Interval = 24 * 60 * 60000;
             updateTimer.Tick += OnUpdateTimer;
             refreshTimer.Start();
@@ -298,15 +370,47 @@ namespace AiUsageWidget
             RunCheck();
         }
 
+        void OnPowerModeChanged(object sender, PowerModeChangedEventArgs e)
+        {
+            if (e.Mode == PowerModes.Resume) ScheduleDelayedRefresh();
+        }
+
+        void OnNetworkAvailabilityChanged(object sender, NetworkAvailabilityEventArgs e)
+        {
+            if (e.IsAvailable) ScheduleDelayedRefresh();
+        }
+
+        // The system events arrive on other threads; marshal onto the UI thread and never
+        // touch a form that is going away. While one delayed refresh is pending, further
+        // events change nothing.
+        void ScheduleDelayedRefresh()
+        {
+            if (IsDisposed) return;
+            try
+            {
+                BeginInvoke((MethodInvoker)delegate
+                {
+                    if (IsDisposed || resumeRefreshPending) return;
+                    resumeRefreshPending = true;
+                    resumeTimer.Start();
+                });
+            }
+            catch (InvalidOperationException)
+            {
+                // no handle yet (or already gone): nothing to schedule on
+            }
+        }
+
         [System.Runtime.InteropServices.DllImport("kernel32.dll")]
         static extern bool SetProcessWorkingSetSize(IntPtr process, IntPtr min, IntPtr max);
 
         // Hands pages the widget is not using back to Windows. The HTTP stack leaves the
-        // working set well above what an idle widget needs after each refresh.
+        // working set well above what an idle widget needs; run after each refresh.
         static void TrimMemory()
         {
             GC.Collect();
-            SetProcessWorkingSetSize(System.Diagnostics.Process.GetCurrentProcess().Handle, (IntPtr)(-1), (IntPtr)(-1));
+            using (System.Diagnostics.Process current = System.Diagnostics.Process.GetCurrentProcess())
+                SetProcessWorkingSetSize(current.Handle, (IntPtr)(-1), (IntPtr)(-1));
         }
 
         async void RunRefresh(bool manual)
@@ -314,12 +418,26 @@ namespace AiUsageWidget
             try
             {
                 RecomputeShown();   // detection runs at the start of every refresh
+                if (manual && (refresh.Busy
+                    || (DateTime.UtcNow - refresh.LastRunStartUtc).TotalSeconds < 30))
+                {
+                    ShowJustRefreshed();   // RunOnceAsync would return silently: say so instead
+                    return;
+                }
                 await refresh.RunOnceAsync(manual);
             }
             catch (Exception)
             {
                 // a refresh must never take the widget down
             }
+        }
+
+        void ShowJustRefreshed()
+        {
+            justRefreshed = true;
+            noteTimer.Stop();
+            noteTimer.Start();
+            Invalidate();
         }
 
         async void RunCheck()
@@ -377,8 +495,9 @@ namespace AiUsageWidget
             menu.Items.Add(layoutItem);
 
             // Subscriptions: every registered provider with its shown/hidden state (spec 13).
+            // Detection comes from the cache RefreshDetection keeps fresh.
             var subsItem = new ToolStripMenuItem("Subscriptions");
-            foreach (IUsageProvider p in ProviderRegistry.All)
+            foreach (IUsageProvider p in allProviders)
             {
                 bool shown = activeIds.Contains(p.Id);
                 string suffix = !shown ? " (hidden)"
@@ -402,8 +521,8 @@ namespace AiUsageWidget
             subsItem.DropDownItems.Add(autoItem);
             menu.Items.Add(subsItem);
 
-            // Detected tools with no usage provider yet (spec section 13).
-            suggestions = ComputeSuggestions();
+            // Detected tools with no usage provider yet (spec section 13); `suggestions`
+            // comes from RecomputeShown / the constructor — no detection scans here.
             var sugItem = new ToolStripMenuItem("Detected, no usage support yet");
             foreach (string toolId in suggestions)
             {
@@ -485,13 +604,15 @@ namespace AiUsageWidget
 
         void SetLayout(string layout)
         {
+            int newMode = layout == "compact" ? 1 : 0;
+            if (mode == 0 && newMode == 1) detailedWidth = ClientSize.Width;   // remember the chosen width
             settings.Layout = layout;
-            mode = layout == "compact" ? 1 : 0;
+            mode = newMode;
             scroll = 0;
             int right = Right;
             Rectangle wa = Screen.FromControl(this).WorkingArea;
             int width = mode == 0
-                ? (int)painter.S(340)
+                ? detailedWidth   // the last width the user chose in Detailed, not a forced default
                 : Math.Min((int)Math.Ceiling(painter.CompactWidthFor(BuildRowsNow())), wa.Width - 32);
             ClientSize = new Size(width, ClientSize.Height);
             Left = Math.Max(wa.Left, right - Width);   // keep the right edge in place
@@ -549,6 +670,7 @@ namespace AiUsageWidget
 
         string HeaderNote()
         {
+            if (justRefreshed) return "just refreshed";
             if (refresh.Busy) return "updating…";
             DateTime? latest = null;
             List<UsageSnapshot> snapshots = refresh.Snapshots;
@@ -633,6 +755,7 @@ namespace AiUsageWidget
         protected override void OnResizeEnd(EventArgs e)
         {
             base.OnResizeEnd(e);
+            if (mode == 0) detailedWidth = ClientSize.Width;   // keep the remembered width current
             SaveSettings();   // fires after a user move or resize
         }
 
@@ -651,48 +774,102 @@ namespace AiUsageWidget
 
         protected override void OnFormClosed(FormClosedEventArgs e)
         {
+            // Static system events: always unsubscribe.
+            SystemEvents.PowerModeChanged -= OnPowerModeChanged;
+            NetworkChange.NetworkAvailabilityChanged -= OnNetworkAvailabilityChanged;
             refreshTimer.Stop();
             minuteTimer.Stop();
             updateTimer.Stop();
+            noteTimer.Stop();
+            resumeTimer.Stop();
             refreshTimer.Dispose();
             minuteTimer.Dispose();
             updateTimer.Dispose();
+            noteTimer.Dispose();
+            resumeTimer.Dispose();
             tray.Dispose();
             base.OnFormClosed(e);
             painter.Dispose();
         }
 
-        // Resizable from all edges, drag anywhere to move, no maximise on double-click.
+        // WS_EX_TOOLWINDOW keeps the widget out of Alt+Tab.
+        protected override CreateParams CreateParams
+        {
+            get
+            {
+                CreateParams cp = base.CreateParams;
+                cp.ExStyle |= 0x80;   // WS_EX_TOOLWINDOW
+                return cp;
+            }
+        }
+
+        // Appearing never steals focus; ShowAndActivate still brings it to the front.
+        protected override bool ShowWithoutActivation
+        {
+            get { return true; }
+        }
+
+        // Drag anywhere to move, no maximise on double-click. The height is always automatic
+        // (FitHeightToContent), so no edge offers vertical resizing: in Detailed mode the
+        // left and right edges resize the width, in Compact mode no edge resizes.
         protected override void WndProc(ref Message m)
         {
             const int WM_NCHITTEST = 0x0084;
+            const int WM_DPICHANGED = 0x02E0;
             const int WM_NCLBUTTONDBLCLK = 0x00A3;
             if (m.Msg == WM_NCLBUTTONDBLCLK) return;
+            if (m.Msg == WM_DPICHANGED)
+            {
+                HandleDpiChanged(m);
+                return;
+            }
             if (m.Msg == WM_NCHITTEST)
             {
                 long lp = m.LParam.ToInt64();
                 Point p = PointToClient(new Point((short)(lp & 0xFFFF), (short)((lp >> 16) & 0xFFFF)));
                 int grip = (int)painter.S(6), w = ClientSize.Width, h = ClientSize.Height;
                 bool l = p.X < grip, r = p.X >= w - grip, t = p.Y < grip, b = p.Y >= h - grip;
-                int code;
-                if (t && l) code = 13;          // HTTOPLEFT
-                else if (t && r) code = 14;     // HTTOPRIGHT
-                else if (b && l) code = 16;     // HTBOTTOMLEFT
-                else if (b && r) code = 17;     // HTBOTTOMRIGHT
-                else if (l) code = 10;          // HTLEFT
-                else if (r) code = 11;          // HTRIGHT
-                else if (t) code = 12;          // HTTOP
-                else if (b) code = 15;          // HTBOTTOM
-                else
+                int code = 2;                   // HTCAPTION: drag anywhere
+                if (mode == 0 && !t && !b)
                 {
-                    code = 2;                   // HTCAPTION: drag anywhere
-                    if (painter.RefreshRect(w).Contains(p) || painter.CloseRect(w).Contains(p))
-                        code = 1;               // HTCLIENT: header buttons handle clicks
+                    if (l) code = 10;           // HTLEFT: width only, Detailed only
+                    else if (r) code = 11;      // HTRIGHT
                 }
+                if (code == 2 && (painter.RefreshRect(w).Contains(p) || painter.CloseRect(w).Contains(p)
+                    || painter.DetailedRect(w, h).Contains(p) || painter.CompactRect(w, h).Contains(p)))
+                    code = 1;                   // HTCLIENT: header buttons and footer chips handle clicks
                 m.Result = (IntPtr)code;
                 return;
             }
             base.WndProc(ref m);
+        }
+
+        // Per-monitor DPI: rebuild the painter at the new scale and take the suggested
+        // bounds. Applying them can raise WM_DPICHANGED again, so re-entrancy is guarded.
+        void HandleDpiChanged(Message m)
+        {
+            if (inDpiChange) return;
+            inDpiChange = true;
+            try
+            {
+                int newDpi = (int)(m.WParam.ToInt64() & 0xFFFF);   // low word: the new DPI
+                int left = System.Runtime.InteropServices.Marshal.ReadInt32(m.LParam, 0);
+                int top = System.Runtime.InteropServices.Marshal.ReadInt32(m.LParam, 4);
+                int right = System.Runtime.InteropServices.Marshal.ReadInt32(m.LParam, 8);
+                int bottom = System.Runtime.InteropServices.Marshal.ReadInt32(m.LParam, 12);
+                Painter old = painter;
+                painter = new Painter(newDpi / 96f);
+                old.Dispose();
+                MinimumSize = new Size((int)painter.S(300), (int)painter.S(120));
+                Bounds = Rectangle.FromLTRB(left, top, right, bottom);
+                if (mode == 0) detailedWidth = ClientSize.Width;
+                FitHeightToContent();
+                Invalidate();
+            }
+            finally
+            {
+                inDpiChange = false;
+            }
         }
 
         sealed class TokenDialog : Form

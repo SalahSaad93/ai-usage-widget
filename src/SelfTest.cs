@@ -58,6 +58,8 @@ namespace AiUsageWidget
             Check(lines, "antigravity_tolerant_shapes", AntigravityTolerantShapes);
             Check(lines, "antigravity_cli_states", AntigravityCliStates);
             Check(lines, "antigravity_detection_and_suggestion", AntigravityDetectionAndSuggestion);
+            Check(lines, "stale_row_shows_message", StaleRowShowsMessage);
+            Check(lines, "toggle_provider_rule", ToggleProviderRule);
 
             string[] all = lines.ToArray();
             if (!string.IsNullOrEmpty(outPath)) File.WriteAllLines(outPath, all, new UTF8Encoding(false)); // no BOM: the log must start with PASS
@@ -1156,6 +1158,59 @@ namespace AiUsageWidget
             That(KnownTools.HelpText("antigravity") == "Install the agy CLI and sign in to see usage",
                 "tray help line");
             That(KnownTools.HelpText("cursor") == null, "no help line for other tools");
+        }
+
+        // A Stale row's tag gains the snapshot's own message: "stale 42m · sign in needed:
+        // open Claude Code"; without a message the plain tag stays.
+        static void StaleRowShowsMessage()
+        {
+            DateTime now = new DateTime(2026, 11, 14, 12, 0, 0, DateTimeKind.Utc);
+            var snapshots = new List<UsageSnapshot>();
+
+            UsageSnapshot withMessage = SnapFor("claude-code", "Claude Code");
+            withMessage.Status = ProviderStatus.Stale;
+            withMessage.Message = "sign in needed: open Claude Code";
+            withMessage.FetchedAtUtc = now.AddMinutes(-42);
+            snapshots.Add(withMessage);
+
+            UsageSnapshot silent = SnapFor("codex", "Codex");
+            silent.Status = ProviderStatus.Stale;
+            silent.FetchedAtUtc = now.AddMinutes(-42);
+            snapshots.Add(silent);
+
+            var ids = new List<string>();
+            ids.Add("claude-code");
+            ids.Add("codex");
+            List<RowVm> rows = Painter.BuildRows(snapshots, now, ids);
+            That(rows.Count == 2, "two stale rows, got " + rows.Count);
+            That(rows[0].Msg == "stale 42m · sign in needed: open Claude Code",
+                "stale row appends the snapshot message, got '" + rows[0].Msg + "'");
+            That(rows[1].Msg == "stale 42m",
+                "stale row without a message keeps the plain tag, got '" + rows[1].Msg + "'");
+        }
+
+        // The provider toggle rule: the new state is the opposite of whether the provider is
+        // shown right now, so one click hides an auto-detected provider.
+        static void ToggleProviderRule()
+        {
+            var entries = new List<ProviderSetting>();
+
+            WidgetForm.ApplyProviderToggle(entries, "codex", true);
+            That(entries.Count == 1 && entries[0].Id == "codex" && !entries[0].Enabled,
+                "unlisted and shown -> listed disabled");
+
+            WidgetForm.ApplyProviderToggle(entries, "muse", false);
+            That(entries.Count == 2 && entries[1].Id == "muse" && entries[1].Enabled,
+                "unlisted and hidden -> listed enabled");
+
+            WidgetForm.ApplyProviderToggle(entries, "codex", true);
+            That(entries.Count == 2 && !entries[0].Enabled, "listed shown flips to disabled");
+
+            WidgetForm.ApplyProviderToggle(entries, "codex", false);
+            That(entries.Count == 2 && entries[0].Enabled, "listed hidden flips to enabled");
+
+            WidgetForm.ApplyProviderToggle(entries, "codex", false);
+            That(entries.Count == 2 && entries[0].Enabled, "repeated toggles add no duplicate entries");
         }
 
     }

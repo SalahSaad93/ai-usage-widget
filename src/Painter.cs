@@ -131,7 +131,11 @@ namespace AiUsageWidget
                 row.Plan = sn.PlanName;
                 row.Status = sn.Status;
                 if (sn.Status == ProviderStatus.Stale)
+                {
                     row.Msg = "stale " + Duration(nowUtc - sn.FetchedAtUtc);
+                    if (!string.IsNullOrEmpty(sn.Message))
+                        row.Msg += " · " + sn.Message;
+                }
                 else if (sn.Status != ProviderStatus.Ok)
                     row.Msg = string.IsNullOrEmpty(sn.Message) ? sn.Status.ToString() : sn.Message;
                 else if (sn.Windows.Count == 0)

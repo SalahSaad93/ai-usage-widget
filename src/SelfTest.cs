@@ -76,6 +76,13 @@ namespace AiUsageWidget
             Check(lines, "provider_info_catalogue", ProviderInfoCatalogue);
             Check(lines, "consent_rows_plan", ConsentRowsPlan);
             Check(lines, "settings_form_values_round_trip", SettingsFormValuesRoundTrip);
+            Check(lines, "history_record_dedup", HistoryRecordDedup);
+            Check(lines, "history_prune", HistoryPrune);
+            Check(lines, "history_round_trip_and_malformed", HistoryRoundTripAndMalformed);
+            Check(lines, "history_file_size", HistoryFileSize);
+            Check(lines, "pace_percent_basics", PacePercentBasics);
+            Check(lines, "forecast_projection", ForecastProjection);
+            Check(lines, "notifier_thresholds_and_reset", NotifierThresholdsAndReset);
 
             string[] all = lines.ToArray();
             if (!string.IsNullOrEmpty(outPath)) File.WriteAllLines(outPath, all, new UTF8Encoding(false)); // no BOM: the log must start with PASS
@@ -1885,6 +1892,371 @@ namespace AiUsageWidget
                 "null settings -> defaults with experimental off");
             That(SettingsForm.MergedProviderTicks(s, new List<IUsageProvider>()).Count == 0,
                 "no providers -> no rows");
+        }
+
+        // --- v0.4.0 history, forecast and notifier checks --------------------------------
+
+        static UsageWindow TestWindow(WindowKind kind, string key, double percent,
+            int? durationSeconds, DateTime? resetsAtUtc)
+        {
+            var w = new UsageWindow();
+            w.Kind = kind;
+            w.Key = key;
+            w.UsedPercent = percent;
+            w.DurationSeconds = durationSeconds;
+            w.ResetsAtUtc = resetsAtUtc;
+            return w;
+        }
+
+        static HistorySample Sample(DateTime tUtc, double percent, DateTime? resetsAtUtc)
+        {
+            var s = new HistorySample();
+            s.TUtc = tUtc;
+            s.UsedPercent = percent;
+            s.ResetsAtUtc = resetsAtUtc;
+            return s;
+        }
+
+        static void HistoryRecordDedup()
+        {
+            string path = Path.Combine(AppPaths.DataDir, "history-dedup.json");
+            DateTime t0 = new DateTime(2026, 5, 1, 10, 0, 0, DateTimeKind.Utc);
+            DateTime clockTime = t0;
+            History history = new History(path, delegate() { return clockTime; });
+
+            var snapshots = new List<UsageSnapshot>();
+            UsageSnapshot ok = SnapFor("codex", "Codex");
+            ok.Windows.Add(TestWindow(WindowKind.FiveHour, "5h", 40, 18000, t0.AddHours(3)));
+            ok.Windows.Add(TestWindow(WindowKind.Weekly, "week", 10, 604800, t0.AddDays(4)));
+            snapshots.Add(ok);
+            UsageSnapshot errored = SnapFor("zai", "Z.ai");
+            errored.Status = ProviderStatus.Error;
+            errored.Windows.Add(TestWindow(WindowKind.FiveHour, "5h", 77, 18000, t0.AddHours(3)));
+            snapshots.Add(errored);
+
+            history.Record(snapshots, t0);
+            history.Record(snapshots, t0.AddMinutes(5));   // nothing changed: both dropped
+            That(history.Samples("codex", "5h").Count == 1,
+                "an identical sample within 30 minutes is deduplicated");
+            That(history.Samples("codex", "week").Count == 1, "the second window deduplicated too");
+            That(history.Samples("zai", "5h").Count == 0, "non-Ok snapshots are never recorded");
+
+            ok.Windows[0].UsedPercent = 55;
+            history.Record(snapshots, t0.AddMinutes(5));   // percent differs: kept
+            That(history.Samples("codex", "5h").Count == 2, "a different percent appends");
+
+            history.Record(snapshots, t0.AddMinutes(10));   // identical again: dropped
+            That(history.Samples("codex", "5h").Count == 2, "an identical sample still deduplicates");
+
+            ok.Windows[1].ResetsAtUtc = ok.Windows[1].ResetsAtUtc.Value.AddHours(1);
+            history.Record(snapshots, t0.AddMinutes(12));   // reset moved on the week window
+            That(history.Samples("codex", "week").Count == 2, "a changed reset time appends");
+
+            history.Record(snapshots, t0.AddMinutes(45));   // 40 min since the last 5h sample
+            That(history.Samples("codex", "5h").Count == 3, "a last sample older than 30 minutes appends");
+
+            List<HistorySample> five = history.Samples("codex", "5h");
+            That(five[0].TUtc == t0 && five[1].TUtc == t0.AddMinutes(5)
+                && five[2].TUtc == t0.AddMinutes(45), "samples come back oldest first");
+            That(five[0].UsedPercent == 40 && five[1].UsedPercent == 55 && five[2].UsedPercent == 55,
+                "sample percents survive");
+            That(five[0].ResetsAtUtc.HasValue && five[0].ResetsAtUtc.Value == t0.AddHours(3),
+                "sample reset time survives");
+
+            // Windows without a key are skipped: no series is created for them.
+            UsageSnapshot noKey = SnapFor("claude-code", "Claude Code");
+            noKey.Windows.Add(TestWindow(WindowKind.FiveHour, null, 10, 18000, t0.AddHours(2)));
+            history.Record(new List<UsageSnapshot> { noKey }, t0.AddMinutes(46));
+            That(history.Samples("claude-code", "5h").Count == 0, "windows without a key are skipped");
+            That(history.Samples("nope", "nope").Count == 0, "an unknown series is empty");
+        }
+
+        static void HistoryPrune()
+        {
+            string path = Path.Combine(AppPaths.DataDir, "history-prune.json");
+            DateTime t0 = new DateTime(2026, 5, 1, 0, 0, 0, DateTimeKind.Utc);
+            History history = new History(path, delegate() { return t0; });
+
+            var snapshots = new List<UsageSnapshot>();
+            UsageSnapshot ok = SnapFor("codex", "Codex");
+            ok.Windows.Add(TestWindow(WindowKind.FiveHour, "5h", 40, 18000, t0.AddHours(3)));
+            snapshots.Add(ok);
+            history.Record(snapshots, t0.AddDays(-10));
+            history.Record(snapshots, t0.AddDays(-2));   // same percent, but far apart: kept
+            history.Record(snapshots, t0);
+            That(history.Samples("codex", "5h").Count == 3, "three samples recorded");
+
+            history.Prune(t0, 7);   // keep 7 days
+            List<HistorySample> left = history.Samples("codex", "5h");
+            That(left.Count == 2 && left[0].TUtc == t0.AddDays(-2),
+                "samples older than keepDays are dropped");
+
+            history.Prune(t0, 1);
+            That(history.Samples("codex", "5h").Count == 1, "prune keeps only the recent sample");
+
+            // A series that lost everything disappears.
+            UsageSnapshot gone = SnapFor("muse", "Muse");
+            gone.Windows.Add(TestWindow(WindowKind.Daily, "day", 5, 86400, t0.AddDays(-2)));
+            history.Record(new List<UsageSnapshot> { gone }, t0.AddDays(-5));
+            That(history.Samples("muse", "day").Count == 1, "the old series is present");
+            history.Prune(t0, 1);
+            That(history.Samples("muse", "day").Count == 0, "emptied series are removed");
+        }
+
+        static void HistoryRoundTripAndMalformed()
+        {
+            string path = Path.Combine(AppPaths.DataDir, "history-roundtrip.json");
+            DateTime t0 = new DateTime(2026, 5, 1, 0, 0, 0, DateTimeKind.Utc);
+            History history = new History(path, delegate() { return t0; });
+            var ok = SnapFor("codex", "Codex");
+            ok.Windows.Add(TestWindow(WindowKind.FiveHour, "5h", 41.5, 18000, t0.AddHours(3)));
+            ok.Windows.Add(TestWindow(WindowKind.Weekly, "week", 12.34, 604800, null));
+            history.Record(new List<UsageSnapshot> { ok }, t0);
+            ok.Windows[0].UsedPercent = 87.65;
+            history.Record(new List<UsageSnapshot> { ok }, t0.AddMinutes(40));
+            history.Save();
+
+            string raw = File.ReadAllText(path);
+            That(raw.Contains("[["), "samples are compact numeric arrays, got " + raw);
+            That(!raw.Contains("usedPercent"), "no per-sample field names");
+
+            History loaded = new History(path, delegate() { return t0; });
+            loaded.Load();
+            List<HistorySample> five = loaded.Samples("codex", "5h");
+            That(five.Count == 2, "both samples survive, got " + five.Count);
+            That(five[0].TUtc == t0 && five[0].UsedPercent == 41.5, "time and percent survive");
+            That(five[0].ResetsAtUtc.HasValue && five[0].ResetsAtUtc.Value == t0.AddHours(3),
+                "the reset time survives");
+            That(five[1].UsedPercent == 87.65, "the second percent survives");
+            List<HistorySample> week = loaded.Samples("codex", "week");
+            That(week.Count == 2 && week[0].UsedPercent == 12.34 && !week[0].ResetsAtUtc.HasValue,
+                "a null reset survives, got " + week.Count + " samples");
+            That(!week[1].ResetsAtUtc.HasValue, "the second null reset survives");
+
+            // A malformed file loads as empty.
+            File.WriteAllText(path, "{ not json at all");
+            History broken = new History(path, delegate() { return t0; });
+            broken.Load();
+            That(broken.Samples("codex", "5h").Count == 0, "a malformed file loads as empty");
+
+            // A missing file loads as empty.
+            History missing = new History(Path.Combine(AppPaths.DataDir, "history-missing.json"),
+                delegate() { return t0; });
+            missing.Load();
+            That(missing.Samples("codex", "5h").Count == 0, "a missing file loads as empty");
+
+            // I/O problems never throw: saving onto a directory path is swallowed.
+            string blocked = Path.Combine(AppPaths.DataDir, "history-blocked");
+            Directory.CreateDirectory(blocked);
+            History blockedHistory = new History(blocked, delegate() { return t0; });
+            blockedHistory.Record(new List<UsageSnapshot> { ok }, t0);
+            blockedHistory.Save();   // the replace fails and is logged, not thrown
+            blockedHistory.Load();
+        }
+
+        static void HistoryFileSize()
+        {
+            string path = Path.Combine(AppPaths.DataDir, "history-size.json");
+            DateTime t0 = new DateTime(2026, 5, 1, 0, 0, 0, DateTimeKind.Utc);
+            History history = new History(path, delegate() { return t0; });
+
+            // 10 windows over 30 days at the 30-minute dedup floor, the percent changing a
+            // little each time so nothing deduplicates away.
+            var snapshots = new List<UsageSnapshot>();
+            UsageSnapshot ok = SnapFor("codex", "Codex");
+            for (int i = 0; i < 10; i++)
+                ok.Windows.Add(TestWindow(WindowKind.FiveHour, "w" + i, 0, 18000, t0.AddHours(5)));
+            snapshots.Add(ok);
+
+            DateTime at = t0;
+            for (int i = 0; i < 1440; i++)
+            {
+                for (int j = 0; j < 10; j++)
+                    ok.Windows[j].UsedPercent = (i + j) % 101;
+                history.Record(snapshots, at);
+                at = at.AddMinutes(30);
+            }
+            history.Save();
+            long bytes = new FileInfo(path).Length;
+            That(bytes < 512 * 1024,
+                "30 days of samples for 10 windows stays well under 1 MB, got " + bytes + " bytes");
+        }
+
+        static void PacePercentBasics()
+        {
+            DateTime t0 = new DateTime(2026, 5, 1, 0, 0, 0, DateTimeKind.Utc);   // window start
+            UsageWindow w = TestWindow(WindowKind.FiveHour, "5h", 0, 18000, t0.AddSeconds(18000));
+
+            That(Forecast.PacePercent(w, t0) == 0, "the pace at the window start is 0");
+            double? half = Forecast.PacePercent(w, t0.AddSeconds(9000));
+            That(half.HasValue && Math.Abs(half.Value - 50) < 1e-9, "the pace mid-window is 50");
+            That(Forecast.PacePercent(w, t0.AddSeconds(18000)) == 100, "the pace at the reset is 100");
+            That(Forecast.PacePercent(w, t0.AddSeconds(36000)) == 100, "past the reset it clamps to 100");
+            That(Forecast.PacePercent(w, t0.AddSeconds(-60)) == 0, "before the start it clamps to 0");
+
+            UsageWindow noDuration = TestWindow(WindowKind.Weekly, "week", 0, null, t0.AddSeconds(600));
+            That(!Forecast.PacePercent(noDuration, t0).HasValue, "an unknown duration gives null");
+            UsageWindow noReset = TestWindow(WindowKind.Weekly, "week", 0, 604800, null);
+            That(!Forecast.PacePercent(noReset, t0).HasValue, "an unknown reset gives null");
+        }
+
+        static void ForecastProjection()
+        {
+            DateTime t0 = new DateTime(2026, 5, 1, 0, 0, 0, DateTimeKind.Utc);   // window start
+            DateTime now = t0.AddHours(1);                                        // 1 h into a 5 h window
+            DateTime reset = t0.AddHours(5);
+            UsageWindow w = TestWindow(WindowKind.FiveHour, "5h", 40, 18000, reset);
+
+            // A steady burn of 30 %/h: 10, 25, 40 at the start, +30 m and +60 m. Samples
+            // from the previous window generation (reset at t0) sit in the middle and
+            // must be ignored even though they are within the last 90 minutes.
+            var steady = new List<HistorySample>();
+            steady.Add(Sample(t0.AddMinutes(-60), 80, t0));
+            steady.Add(Sample(t0.AddMinutes(-30), 95, t0));
+            steady.Add(Sample(t0, 10, reset));
+            steady.Add(Sample(t0.AddMinutes(30), 25, reset));
+            steady.Add(Sample(now, 40, reset));
+
+            ForecastResult r = Forecast.Project(w, steady, now);
+            That(r.RatePerHour.HasValue && Math.Abs(r.RatePerHour.Value - 30) < 1e-9,
+                "the steady slope is 30 %/h, got " + r.RatePerHour);
+            Near(r.HitsLimitAtUtc, now.AddHours(2), "hit time (100-40)/30 h after now");
+            That(r.BeforeReset, "the limit is hit before the reset");
+            That(r.Text == "limit in 2h", "the text is 'limit in 2h', got '" + r.Text + "'");
+
+            // Fewer than three recent samples: fall back to the even pace (20 % at 1 h of 5 h).
+            var sparse = new List<HistorySample>();
+            sparse.Add(Sample(t0, 10, reset));
+            sparse.Add(Sample(now.AddMinutes(-5), 12, reset));
+            r = Forecast.Project(w, sparse, now);
+            That(r.RatePerHour.HasValue && Math.Abs(r.RatePerHour.Value - 20) < 1e-9,
+                "sparse history falls back to the pace, got " + r.RatePerHour);
+            That(r.Text == "limit in 3h", "the pace fallback text, got '" + r.Text + "'");
+
+            // Three samples but spanning under 10 minutes: still the pace.
+            var tight = new List<HistorySample>();
+            tight.Add(Sample(now.AddMinutes(-2), 39, reset));
+            tight.Add(Sample(now.AddMinutes(-1), 40, reset));
+            tight.Add(Sample(now, 41, reset));
+            r = Forecast.Project(w, tight, now);
+            That(r.RatePerHour.HasValue && Math.Abs(r.RatePerHour.Value - 20) < 1e-9,
+                "a span under 10 minutes still uses the pace, got " + r.RatePerHour);
+
+            // No current-window samples at all: the pace alone still answers.
+            r = Forecast.Project(w, new List<HistorySample>(), now);
+            That(r.RatePerHour.HasValue && Math.Abs(r.RatePerHour.Value - 20) < 1e-9,
+                "an empty history still falls back to the pace, got " + r.RatePerHour);
+
+            // Unknown window shape: nothing at all.
+            UsageWindow opaque = TestWindow(WindowKind.Other, "odd", 50, null, null);
+            r = Forecast.Project(opaque, steady, now);
+            That(!r.RatePerHour.HasValue && !r.HitsLimitAtUtc.HasValue && !r.BeforeReset
+                && r.Text == "", "an unknown window shape projects nothing");
+
+            // The limit would only be hit well after the reset: no announcement.
+            UsageWindow safe = TestWindow(WindowKind.FiveHour, "5h", 10, 18000, now.AddHours(1));
+            r = Forecast.Project(safe, new List<HistorySample>(), now);
+            That(r.RatePerHour.HasValue && Math.Abs(r.RatePerHour.Value - 20) < 1e-6,
+                "four hours in, the even rate is 20 %/h, got " + r.RatePerHour);
+            That(r.HitsLimitAtUtc.HasValue && !r.BeforeReset && r.Text == "",
+                "a hit after the reset is not announced");
+
+            // Already at the limit: no hit time at all.
+            UsageWindow full = TestWindow(WindowKind.FiveHour, "5h", 100, 18000, now.AddHours(1));
+            r = Forecast.Project(full, new List<HistorySample>(), now);
+            That(!r.HitsLimitAtUtc.HasValue && !r.BeforeReset && r.Text == "",
+                "a full window has no hit time");
+        }
+
+        static void NotifierThresholdsAndReset()
+        {
+            DateTime t0 = new DateTime(2026, 5, 1, 0, 0, 0, DateTimeKind.Utc);
+            NotificationSettings cfg = new NotificationSettings();   // enabled, {80, 95}, no reset
+
+            // First sight at 90 %: nothing, even though both thresholds are below it.
+            Notifier n = new Notifier();
+            var snaps = new List<UsageSnapshot>();
+            UsageSnapshot ok = SnapFor("codex", "Codex");
+            UsageWindow week = TestWindow(WindowKind.Weekly, "week", 90, 604800, t0.AddHours(3));
+            week.Label = "week";
+            ok.Windows.Add(week);
+            snaps.Add(ok);
+            That(n.Evaluate(snaps, cfg, t0).Count == 0, "first sight never notifies");
+
+            // Crossing 95 alone announces once, with the reset suffix.
+            week.UsedPercent = 96;
+            List<string> msgs = n.Evaluate(snaps, cfg, t0.AddMinutes(5));
+            That(msgs.Count == 1, "one crossing, one message, got " + msgs.Count);
+            That(msgs[0] == "Codex week: 96% used, resets in 2h 55m",
+                "the message text, got '" + msgs[0] + "'");
+
+            // Staying above fires nothing.
+            That(n.Evaluate(snaps, cfg, t0.AddMinutes(10)).Count == 0,
+                "staying above the threshold does not re-fire");
+
+            // A drop announces nothing (crossings are upward), then climbing past both
+            // thresholds at once still announces once.
+            week.UsedPercent = 30;
+            That(n.Evaluate(snaps, cfg, t0.AddMinutes(15)).Count == 0, "a drop is quiet");
+            week.UsedPercent = 97;
+            msgs = n.Evaluate(snaps, cfg, t0.AddMinutes(20));
+            That(msgs.Count == 1 && msgs[0] == "Codex week: 97% used, resets in 2h 40m",
+                "a double crossing emits one message, got " + msgs.Count + ": '"
+                + (msgs.Count > 0 ? msgs[0] : "") + "'");
+
+            // A window without a label gets the default label of its kind.
+            UsageSnapshot anon = SnapFor("zai", "Z.ai GLM");
+            anon.Windows.Add(TestWindow(WindowKind.FiveHour, "5h", 10, 18000, t0.AddHours(2)));
+            var anonSnaps = new List<UsageSnapshot>();
+            anonSnaps.Add(anon);
+            That(n.Evaluate(anonSnaps, cfg, t0.AddMinutes(25)).Count == 0, "first sight at 10 is quiet");
+            anon.Windows[0].UsedPercent = 82;
+            msgs = n.Evaluate(anonSnaps, cfg, t0.AddMinutes(30));
+            That(msgs.Count == 1 && msgs[0].StartsWith("Z.ai GLM 5 hours: 82% used", StringComparison.Ordinal),
+                "the default kind label is used, got '" + (msgs.Count > 0 ? msgs[0] : "") + "'");
+
+            // Disabled: nothing comes out, but the remembered state still advances.
+            var snaps3 = new List<UsageSnapshot>();
+            UsageSnapshot muted = SnapFor("muse", "Muse");
+            UsageWindow day = TestWindow(WindowKind.Daily, "day", 85, 86400, t0.AddHours(6));
+            muted.Windows.Add(day);
+            snaps3.Add(muted);
+            NotificationSettings off = new NotificationSettings();
+            off.Enabled = false;
+            Notifier mutedN = new Notifier();
+            That(mutedN.Evaluate(snaps3, off, t0).Count == 0, "disabled -> nothing");
+            day.UsedPercent = 30;
+            That(mutedN.Evaluate(snaps3, off, t0.AddMinutes(5)).Count == 0, "disabled -> still nothing");
+            day.UsedPercent = 82;
+            msgs = mutedN.Evaluate(snaps3, cfg, t0.AddMinutes(10));
+            That(msgs.Count == 1 && msgs[0] == "Muse day: 82% used, resets in 5h 50m",
+                "state advanced while disabled, got '" + (msgs.Count > 0 ? msgs[0] : "") + "'");
+
+            // OnReset: a forward reset with a big drop announces, and the thresholds re-arm.
+            NotificationSettings cfgReset = new NotificationSettings();
+            cfgReset.OnReset = true;
+            Notifier resetN = new Notifier();
+            var snaps4 = new List<UsageSnapshot>();
+            UsageSnapshot codex = SnapFor("codex", "Codex");
+            UsageWindow five = TestWindow(WindowKind.FiveHour, "5h", 95, 18000, t0.AddHours(5));
+            codex.Windows.Add(five);
+            snaps4.Add(codex);
+            That(resetN.Evaluate(snaps4, cfgReset, t0).Count == 0, "reset flow: first sight quiet");
+            five.UsedPercent = 80;
+            That(resetN.Evaluate(snaps4, cfgReset, t0.AddMinutes(5)).Count == 0,
+                "a drop without a new window is quiet");
+            five.UsedPercent = 25;
+            five.ResetsAtUtc = t0.AddHours(9);
+            msgs = resetN.Evaluate(snaps4, cfgReset, t0.AddMinutes(10));
+            That(msgs.Count == 1 && msgs[0] == "Codex 5 hours: reset",
+                "the reset message, got '" + (msgs.Count > 0 ? msgs[0] : "") + "'");
+            five.UsedPercent = 83;
+            msgs = resetN.Evaluate(snaps4, cfgReset, t0.AddMinutes(30));
+            That(msgs.Count == 1 && msgs[0].Contains("83% used"), "thresholds re-arm after a reset");
+            five.UsedPercent = 80;
+            five.ResetsAtUtc = t0.AddHours(13);
+            That(resetN.Evaluate(snaps4, cfgReset, t0.AddMinutes(35)).Count == 0,
+                "a 3-point drop is not a reset");
         }
 
     }
